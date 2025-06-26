@@ -1,0 +1,99 @@
+name: Build .NET SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      fork:
+        description: 'dotnet VMR fork name'
+        required: true
+        type: string
+        default: chenguohui
+      branch:
+        description: 'dotnet VMR branch name'
+        required: true
+        type: string
+        default: v10.0.0-preview.5.25277.114+loong
+      release:
+        description: 'publish release'
+        type: boolean
+        default: true
+
+jobs:
+  run:
+    runs-on: self-hosted
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dotnet-linux-loongarch64-artifacts
+        github-token: ${{ secrets.CLONE_TOKEN }}
+        repository: chenguohui/dotnet-loongarch
+        run-id: 15897980901
+        path: assets/
+
+    - name: Prepare sdk and pkg
+      run: |
+        rm -rf ${{ github.workspace }}/sdk ${{ github.workspace }}/pkg
+        mkdir -p ${{ github.workspace }}/sdk ${{ github.workspace }}/pkg
+        cd ${{ github.workspace }}/assets
+        tar xf dotnet-sdk-*.tar.gz -C ${{ github.workspace }}/sdk
+        tar xf Private.SourceBuilt.Artifacts.*.tar.gz -C ${{ github.workspace }}/pkg
+
+    - name: Clone repository
+      run: |
+        rm -rf ${{ github.workspace }}/dotnet
+        git clone --single-branch --depth 1 -b ${{ inputs.branch }} https://github.com/${{ inputs.fork }}/dotnet ${{ github.workspace }}/dotnet
+
+    - name: Build
+      run: |
+        cd ${{ github.workspace }}/dotnet
+        ./build.sh  -c Release -sb --clean-while-building --with-packages ${{ github.workspace }}/pkg --with-sdk ${{ github.workspace }}/sdk -- -p:PortableBuild=true
+
+    - name: List assets directory
+      run: |
+        ls -lh ${{ github.workspace }}/dotnet/artifacts
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/Runtime/*/dotnet-runtime-*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/aspnetcore/Runtime/*/aspnetcore-runtime-*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/*linux-loongarch64*.nupkg
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/aspnetcore/*linux-loongarch64*.nupkg
+
+    - name: Upload .NET
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-linux-${{ inputs.branch }}
+        path: |
+          ${{ github.workspace }}/dotnet/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz
+          ${{ github.workspace }}/dotnet/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz
+        compression-level: 0  # all artifacts are already compressed
+
+    - name: Make release
+      if: ${{ inputs.release }}
+      run: |
+        sudo apt install -y hub
+
+        # hub(1) requires release to be created inside a git repo
+        rm -rf repo
+        git clone https://${{ secrets.CLONE_TOKEN }}:x-oauth-basic@github.com/${{ github.repository }}.git repo
+        cd repo
+
+        artifacts=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/Runtime/*/dotnet-runtime-*.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/aspnetcore/Runtime/*/aspnetcore-runtime-*.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/*linux-loongarch64*.nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/aspnetcore/*linux-loongarch64*.nupkg"
+        tag_name=${{ inputs.branch }}
+
+        echo "tag_name: $tag_name"
+        echo "artifacts: $artifacts"
+
+        # docs: https://hub.github.com/hub-release.1.html
+        hub release create $artifacts --prerelease -m "$tag_name" "$tag_name"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
