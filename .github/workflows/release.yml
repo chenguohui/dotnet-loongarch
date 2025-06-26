@@ -1,0 +1,75 @@
+name: Release .NET SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      fork:
+        description: 'dotnet VMR fork name'
+        required: true
+        type: string
+        default: chenguohui
+      branch:
+        description: 'dotnet VMR branch name'
+        required: true
+        type: string
+        default: v10.0.0-preview.5.25277.114+loong
+      release:
+        description: 'publish release'
+        type: boolean
+        default: true
+
+jobs:
+  run:
+    runs-on: self-hosted
+
+    permissions:
+      contents: write
+
+    steps:
+
+    - name: List assets directory
+      run: |
+        ls -lh ${{ github.workspace }}/dotnet/artifacts
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/Runtime/*/dotnet-runtime-*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/assets/Release/aspnetcore/Runtime/*/aspnetcore-runtime-*.tar.gz
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/*linux-loongarch64*.nupkg
+        ls -lh ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/aspnetcore/*linux-loongarch64*.nupkg
+
+    - name: Make release
+      if: ${{ inputs.release }}
+      run: |
+        sudo apt install -y hub
+
+        # hub(1) requires release to be created inside a git repo
+        rm -rf repo
+        git clone https://${{ secrets.CLONE_TOKEN }}:x-oauth-basic@github.com/${{ github.repository }}.git repo
+        cd repo
+
+
+        artifacts=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.linux-loongarch64.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/Sdk/*/dotnet-sdk-*-linux-loongarch64.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/Runtime/*/dotnet-runtime-*-linux-loongarch64.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/assets/Release/aspnetcore/Runtime/*/aspnetcore-runtime-[0-9]*-linux-loongarch64.tar.gz"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/Microsoft.NETCore.App.Crossgen2.linux-loongarch64.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/Microsoft.NETCore.App.Host.linux-loongarch64.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/Microsoft.NETCore.App.Runtime.NativeAOT.linux-loongarch64.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/Microsoft.NETCore.App.Runtime.linux-loongarch64.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/runtime.linux-loongarch64.Microsoft.DotNet.ILCompiler.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/runtime.linux-loongarch64.Microsoft.NETCore.DotNetAppHost.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/runtime.linux-loongarch64.Microsoft.NETCore.ILAsm.*-dev.nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/runtime.linux-loongarch64.Microsoft.NETCore.ILDAsm.*-dev.nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/runtime/runtime.linux-loongarch64.runtime.native.System.IO.Ports.*[0-9].nupkg"
+        artifacts+=" -a ${{ github.workspace }}/dotnet/artifacts/packages/Release/Shipping/aspnetcore/Microsoft.AspNetCore.App.Runtime.linux-loongarch64.*[0-9].nupkg"
+
+
+        tag_name=${{ inputs.branch }}
+
+        echo "tag_name: $tag_name"
+        echo "artifacts: $artifacts"
+
+        # docs: https://hub.github.com/hub-release.1.html
+        hub release create $artifacts --prerelease -m "$tag_name" "$tag_name"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
