@@ -1,0 +1,107 @@
+name: Build .NET SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      fork:
+        description: 'dotnet VMR fork name'
+        required: true
+        type: string
+        default: chenguohui
+      branch:
+        description: 'dotnet VMR branch name'
+        required: true
+        type: string
+        default: v10.0.0-preview.5.25277.114+loong
+      release:
+        description: 'publish release'
+        type: boolean
+        default: true
+
+jobs:
+  build-dotnet:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - rid: linux-loongarch64
+            container: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-loongarch64
+            osName: linux
+          - rid: linux-musl-loongarch64
+            container: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-loongarch64-musl
+            osName: linux-musl
+            
+    env:      
+      RUNTIME_VERSION: 10.0.0-preview.5.25277.114
+      ASPNETCORE_VERSION: 10.0.0-preview.5.25277.114
+      SDK_VERSION: 10.0.0-preview.5.25277.114
+
+    steps:
+    # - name: Maximize build space
+    #   uses: AdityaGarg8/remove-unwanted-software@v4.1
+    #   with:
+    #     remove-dotnet: 'true'
+    #     remove-android: 'true'
+    #     remove-haskell: 'true'
+    #     remove-codeql: 'true'
+    #     remove-cached-tools: 'true'        
+
+    - name: Clone repository
+      run: |
+        cd /mnt/
+        sudo git clone --depth 1 -b ${{ inputs.branch }} https://github.com/${{ inputs.fork }}/dotnet
+
+    - name: Build
+      run: |
+        docker run --platform linux/amd64 --rm -v/mnt/dotnet:/dotnet -w /dotnet \
+          -e ROOTFS_DIR=/crossrootfs/loongarch64 -e SDK_VERSION=${SDK_VERSION} -e RUNTIME_VERSION=${RUNTIME_VERSION} -e ASPNETCORE_VERSION=${ASPNETCORE_VERSION} \
+          ${{ matrix.container }} \
+          sh -c '
+            mkdir -p artifacts/Runtime/${RUNTIME_VERSION}
+            mkdir -p artifacts/aspnetcore/Runtime/${ASPNETCORE_VERSION}
+            echo ${RUNTIME_VERSION} ${ASPNETCORE_VERSION} ${SDK_VERSION}
+            
+            # Build Runtime
+            pushd src/runtime
+            ./build.sh -c Release --cross --arch loongarch64 --os ${{ matrix.osName }} || exit 1
+            cp artifacts/packages/Release/Shipping/*.tar.gz ../../artifacts/Runtime/${RUNTIME_VERSION}
+            popd
+            
+            # Build ASP.NET Core
+            pushd src/aspnetcore
+            sed -i "s|\$(BaseIntermediateOutputPath)\$(DotNetRuntimeArchiveFileName)|/dotnet/src/runtime/artifacts/packages/Release/Shipping/\$(DotNetRuntimeArchiveFileName)|" src/Framework/App.Runtime/src/Microsoft.AspNetCore.App.Runtime.csproj
+            ./eng/build.sh --pack --ci -c Release -arch loongarch64 --os-name ${{ matrix.osName }} || exit 1
+            cp artifacts/installers/Release/* ../../artifacts/aspnetcore/Runtime/${ASPNETCORE_VERSION}
+            popd
+            # Build .NET SDK
+            pushd src/sdk
+            sed -i s"|<clear />|<clear />\n<add key=\"runtime-local\" value=\"/dotnet/src/runtime/artifacts/packages/Release/Shipping/\" />|" NuGet.config
+            sed -i s"|<clear />|<clear />\n<add key=\"aspnetcore-local\" value=\"/dotnet/src/aspnetcore/artifacts/packages/Release/Shipping\" />|" NuGet.config
+            ./build.sh --pack --ci -c Release --warnAsError false /p:Architecture=loongarch64 /p:Version=${SDK_VERSION} /p:PublicBaseURL=file:///dotnet/artifacts/ /p:HostOSName=${{ matrix.osName }} /p:DISABLE_CROSSGEN=true || exit 1
+            popd
+          '
+    - name: List assets directory
+      run: |
+        find "/mnt/dotnet/src/runtime/artifacts/packages/Release/NonShipping/"
+        find "/mnt/dotnet/src/runtime/artifacts/packages/Release/Shipping/"
+        find "/mnt/dotnet/src/aspnetcore/artifacts/packages/Release/NonShipping/"
+        find "/mnt/dotnet/src/aspnetcore/artifacts/packages/Release/Shipping/"
+        find "/mnt/dotnet/src/sdk/artifacts/packages/Release/Shipping/"
+        find "/mnt/dotnet/src/sdk/artifacts/packages/Release/NonShipping/"
+    - name: Upload .NET Runtime Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-artifacts-${{ matrix.rid }}
+        path: |
+          /mnt/dotnet/src/runtime/artifacts/packages/Release/Shipping/*
+          /mnt/dotnet/src/runtime/artifacts/packages/Release/NonShipping/*
+          /mnt/dotnet/src/aspnetcore/artifacts/packages/Release/Shipping/*
+          /mnt/dotnet/src/aspnetcore/artifacts/packages/Release/NonShipping/*
+          
+    - name: Upload .NET SDK
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-sdk-${{ matrix.rid }}
+        path: |
+          /mnt/dotnet/src/sdk/artifacts/packages/Release/Shipping/dotnet-sdk-*.tar.gz*        
