@@ -1,4 +1,4 @@
-name: Build .NET SDK
+name: Build .NET SDK 10
 
 on:
   workflow_dispatch:
