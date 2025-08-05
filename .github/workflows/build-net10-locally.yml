@@ -1,4 +1,4 @@
-name: Release .NET SDK
+name: Build .NET SDK 10 locally - linux-loongarch64
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
         default: true
 
 jobs:
-  run:
+  build-dotnet:
     runs-on: self-hosted
 
     permissions:
@@ -27,15 +27,57 @@ jobs:
 
     steps:
 
+    - name: Prepare sdk and pkg
+      run: |
+        export
+        rm -rf ~/sdk ~/pkg
+        mkdir -p ~/sdk ~/pkg
+
+        cd ~/assets
+        sdk_name=$(ls ~/assets/dotnet-sdk-10* | tail -1)
+        artifacts_name=$(ls ~/assets/Private.SourceBuilt.Artifacts.*.tar.gz | tail -1)
+
+        tar xf $sdk_name -C ~/sdk
+        tar xf $artifacts_name -C ~/pkg
+
+    - name: Prepare repository
+      run: |
+        cd ~/vmr
+        git clean -dfx
+        git checkout -- .
+        git checkout ${{ inputs.branch }}
+        git log -3
+        # sed -i "/aspire/d" repo-projects/sdk.proj
+        # git diff repo-projects/sdk.proj
+
+    - name: Build
+      run: |
+        export LANG=en_US.UTF-8
+        export CI=""
+        cd ~/vmr
+        ./build.sh  -c Release -sb --clean-while-building --with-packages ~/pkg --with-sdk ~/sdk -- -p:PortableBuild=true
+
     - name: List assets directory
       run: |
         ls -lh ~/vmr/artifacts
         ls -lh ~/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz
         ls -lh ~/vmr/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz
         ls -lh ~/vmr/artifacts/assets/Release/Runtime/*/dotnet-runtime-*.tar.gz
-        ls -lh ~/vmr/artifacts/assets/Release/aspnetcore/Runtime/*/aspnetcore-runtime-10*.tar.gz
+        ls -lh ~/vmr/artifacts/assets/Release/aspnetcore/Runtime/*/aspnetcore-runtime-*.tar.gz
         ls -lh ~/vmr/artifacts/packages/Release/Shipping/runtime/*linux-loongarch64*.nupkg
         ls -lh ~/vmr/artifacts/packages/Release/Shipping/aspnetcore/*linux-loongarch64*.nupkg
+
+        cp -v ~/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz ~/assets/
+        cp -v ~/vmr/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz ~/assets/
+
+    - name: Upload .NET
+      uses: actions/upload-artifact@v4
+      with:
+        name: dotnet-linux-loongarch64-${{ inputs.branch }}
+        path: |
+          ~/vmr/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz
+          ~/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz
+        compression-level: 0  # all artifacts are already compressed
 
     - name: Make release
       if: ${{ inputs.release }}
@@ -47,7 +89,6 @@ jobs:
         git clone https://${{ secrets.CLONE_TOKEN }}:x-oauth-basic@github.com/${{ github.repository }}.git repo
         cd repo
 
-
         artifacts=" -a $HOME/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*-loongarch64.tar.gz"
         artifacts+=" -a $HOME/vmr/artifacts/assets/Release/Sdk/*/dotnet-sdk-*-loongarch64.tar.gz"
         artifacts+=" -a $HOME/vmr/artifacts/assets/Release/Runtime/*/dotnet-runtime-*-loongarch64.tar.gz"
@@ -57,9 +98,6 @@ jobs:
         artifacts+=" -a $HOME/vmr/artifacts/packages/Release/Shipping/runtime/Microsoft.NETCore.App.Runtime.*[0-9].nupkg"
         artifacts+=" -a $HOME/vmr/artifacts/packages/Release/Shipping/runtime/runtime.native.System.IO.Ports.*[0-9].nupkg"
         artifacts+=" -a $HOME/vmr/artifacts/packages/Release/Shipping/aspnetcore/Microsoft.AspNetCore.App.Runtime.*[0-9].nupkg"
-
-
-
         tag_name=${{ inputs.branch }}
 
         echo "tag_name: $tag_name"
