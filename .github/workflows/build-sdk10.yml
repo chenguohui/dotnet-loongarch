@@ -1,4 +1,4 @@
-name: Build .NET SDK 10 locally - linux-loongarch64
+name: Build SDK 10 - Local
 
 on:
   workflow_dispatch:

@@ -1,4 +1,4 @@
-name: Build .NET SDK 10
+name: Build SDK 10 - Cross
 
 on:
   workflow_dispatch:
