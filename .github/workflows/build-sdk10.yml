@@ -51,6 +51,7 @@ jobs:
         git log -3
         # sed -i "/aspire/d" repo-projects/sdk.proj
         # git diff repo-projects/sdk.proj
+        sed -i 's#$(NetCoreAppCurrent)-windows;##' src/runtime/src/libraries/System.Transactions.Local/src/System.Transactions.Local.csproj
 
     - name: Build
       run: |
