@@ -25,10 +25,10 @@ jobs:
 
         # unzip tarballs
         cd ~/assets
-        # sdk_name=$(ls ~/assets/dotnet-sdk-10* | tail -1)
-        # artifacts_name=$(ls ~/assets/Private.SourceBuilt.Artifacts.*.tar.gz | tail -1)
-        sdk_name=~/assets/dotnet-sdk-10.0.100-preview.7.25380.108-linux-loongarch64.tar.gz
-        artifacts_name=~/assets/Private.SourceBuilt.Artifacts.10.0.100-preview.7.linux-loongarch64.tar.gz
+        sdk_name=$(ls ~/assets/dotnet-sdk-10* | tail -1)
+        artifacts_name=$(ls ~/assets/Private.SourceBuilt.Artifacts.*.tar.gz | tail -1)
+        # sdk_name=~/assets/dotnet-sdk-10.0.100-preview.7.25380.108-linux-loongarch64.tar.gz
+        # artifacts_name=~/assets/Private.SourceBuilt.Artifacts.10.0.100-preview.7.linux-loongarch64.tar.gz
 
         tar xf $sdk_name -C ~/sdk
         tar xf $artifacts_name -C ~/pkg
