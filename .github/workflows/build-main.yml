@@ -122,6 +122,9 @@ jobs:
         ls -lh ~/vmr/artifacts/packages/Release/Shipping/runtime/*linux-loongarch64*.nupkg
         ls -lh ~/vmr/artifacts/packages/Release/Shipping/aspnetcore/*linux-loongarch64*.nupkg
 
+        # Rename Private.SourceBuilt.Artifacts.*.tar.gz
+        mv -v ~/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz ~/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.${{ env.SDK_VERSION }}.linux-loongarch64.tar.gz
+
         cp -v ~/vmr/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz ~/assets/
         cp -v ~/vmr/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz ~/assets/
 
