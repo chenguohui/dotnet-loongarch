@@ -61,7 +61,7 @@ jobs:
         # 1. Calc and set sdk/runtime/aspnetcore version
         SDK_FEATURE_BAND=10.0.100
         RUNTIME_BAND=10.0.0
-        VERSION_SUFFIX=rc.1
+        VERSION_SUFFIX=rc.2
         VERSION_LABEL=$( date +"%y %m %d" | awk '{print $1 * 1000 + $2 * 50 + $3}' )
         VERSION_ITER=$(( $( git log --since=midnight --oneline | wc -l ) + 1 ))
 
