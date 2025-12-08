@@ -25,10 +25,8 @@ jobs:
 
         # unzip tarballs
         cd ~/assets
-        sdk_name=$(ls -rt ~/assets/dotnet-sdk-10* | tail -1)
+        sdk_name=$(ls -rt ~/assets/dotnet-sdk-* | tail -1)
         artifacts_name=$(ls -rt ~/assets/Private.SourceBuilt.Artifacts.*.tar.gz | tail -1)
-        # sdk_name=~/assets/dotnet-sdk-10.0.100-preview.7.25380.108-linux-loongarch64.tar.gz
-        # artifacts_name=~/assets/Private.SourceBuilt.Artifacts.10.0.100-preview.7.linux-loongarch64.tar.gz
 
         tar xf $sdk_name -C ~/sdk
         tar xf $artifacts_name -C ~/pkg
@@ -59,9 +57,9 @@ jobs:
         cd ~/vmr
 
         # 1. Calc and set sdk/runtime/aspnetcore version
-        SDK_FEATURE_BAND=10.0.100
-        RUNTIME_BAND=10.0.0
-        VERSION_SUFFIX=rc.2
+        SDK_FEATURE_BAND=11.0.100
+        RUNTIME_BAND=11.0.0
+        VERSION_SUFFIX=alpha.1
         VERSION_LABEL=$( date +"%y %m %d" | awk '{print $1 * 1000 + $2 * 50 + $3}' )
         VERSION_ITER=$(( $( git log --since=midnight --oneline | wc -l ) + 1 ))
 
