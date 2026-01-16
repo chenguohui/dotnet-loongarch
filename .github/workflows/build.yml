@@ -12,17 +12,17 @@ on:
         description: 'dotnet VMR branch name'
         required: true
         type: string
-        default: v10.0.1
+        default: v10.0.102
       branding:
-        description: '.NET 10.0-rtm, .NET 11.0-repodefault'
+        description: '.NET 10.0-repodefault, .NET 11.0-repodefault'
         required: true
         type: string
-        default: rtm
+        default: repodefault
       buildid:
         description: 'dotnet OfficialBuildId'
         required: true
         type: string
-        default: 20251119.5
+        default: 20260105.8
 
 jobs:
   build:
