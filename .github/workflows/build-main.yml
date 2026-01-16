@@ -48,7 +48,7 @@ jobs:
 
     - name: List assets directory
       run: |
-        find "${{ github.workspace }}/dotnet/artifacts"
+        find "${{ github.workspace }}/dotnet/artifacts/assets/"
     - name: Upload .NET
       uses: actions/upload-artifact@v4
       with:
