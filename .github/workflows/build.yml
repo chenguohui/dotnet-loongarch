@@ -12,7 +12,7 @@ on:
         description: 'dotnet VMR branch name'
         required: true
         type: string
-        default: v10.0.102-sb1
+        default: v10.0.112
       branding:
         description: '.NET 10.0-release, .NET 11.0-repodefault'
         required: true
@@ -22,7 +22,7 @@ on:
         description: 'dotnet OfficialBuildId'
         required: true
         type: string
-        default: 20260105.8
+        default: 20260822.8
 
 jobs:
   build:
@@ -31,7 +31,7 @@ jobs:
         include:
           - name: linux
             libc: glibc
-            docker_tag: azurelinux-3.0-net10.0-cross-loongarch64
+            docker_tag: azurelinux-3.0-net10.0-cross-loongarch64-lns23
           - name: linux-musl
             libc: musl
             docker_tag: azurelinux-3.0-net10.0-cross-loongarch64-musl
@@ -68,7 +68,7 @@ jobs:
     - name: Build
       run: |
         docker run --platform linux/amd64 --rm -v${{ github.workspace }}/dotnet:/dotnet -w /dotnet -e ROOTFS_DIR=/crossrootfs/loongarch64 \
-          mcr.microsoft.com/dotnet-buildtools/prereqs:${{ matrix.docker_tag }} \
+          ghcr.io/chenguohui/dotnet-buildtools-prereqs-docker:${{ matrix.docker_tag }} \
             ./build.sh --clean-while-building --prep -sb --os ${{ matrix.name }} --rid ${{ matrix.name }}-loongarch64 \
               --arch loongarch64 --branding ${{ inputs.branding }} -p:OfficialBuildId=${{ inputs.buildid }}
 
