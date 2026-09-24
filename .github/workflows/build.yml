@@ -4,40 +4,133 @@ on:
   workflow_dispatch:
     inputs:
       fork:
-        description: 'dotnet VMR fork name'
+        description: 'dotnet VMR fork name（分支已包含 ABI / NativeAOT 维护）'
         required: true
         type: string
-        default: dotnet
-      branch:
-        description: 'dotnet VMR branch name'
+        default: chenguohui
+      target:
+        description: '构建哪一组；net9/net10/net11 只跑对应版本，all 跑全部'
         required: true
-        type: string
-        default: v10.0.112
-      branding:
-        description: '.NET 10.0-release, .NET 11.0-repodefault'
+        type: choice
+        options:
+          - all
+          - net9
+          - net10
+          - net11
+        default: all
+      release:
+        description: '创建 GitHub Release'
         required: true
-        type: string
-        default: release
-      buildid:
-        description: 'dotnet OfficialBuildId'
+        type: boolean
+        default: true
+      overwrite:
+        description: 'Release 已存在时先删除（含 tag）再重建'
         required: true
-        type: string
-        default: 20260822.8
+        type: boolean
+        default: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 构建目标表。每条 = 一个 (ref × 构建变体)，同一个 release_tag 的多条变体
+# （如 lns23 + musl）合并发布到同一个 GitHub Release。
+#
+#   target       构建 job 标识，同时用于 artifact 名
+#   group        net9 / net10 / net11 —— workflow_dispatch 的 target 输入按此过滤
+#   enabled      false = 预留不触发（v11 ABI1.0 分支尚未就绪）
+#   major        .NET 主版本，决定构建命令（9 用 prep-source-build.sh，10/11 用 --prep）
+#   abi          abi1.0 / abi2.0；用于 release notes、tag 校验、Latest 判定
+#   ref          chenguohui/dotnet 里的分支或 tag（CI 不再打补丁）
+#   release_tag  GitHub Release tag；<版本>-abi2.0 / <版本>-abi1.0，后缀必须与 abi 一致
+#   variant      lns8(ABI1.0) / lns23(ABI2.0) / musl(ABI2.0)；os、rid、docker_tag 由它推导
+#   branding     v10: release / v11: repodefault（v9 不使用）
+#   buildid      dotnet OfficialBuildId（v9 不使用）
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  TARGETS: |
+    [
+      {"target":"net9-abi2.0-lns23",  "group":"net9",  "enabled":true,  "major":9,  "abi":"abi2.0", "ref":"v9.0.121-abi2.0",          "release_tag":"v9.0.121-abi2.0",                 "variant":"lns23", "branding":"",            "buildid":""},
+      {"target":"net9-abi2.0-musl",   "group":"net9",  "enabled":true,  "major":9,  "abi":"abi2.0", "ref":"v9.0.121-abi2.0",          "release_tag":"v9.0.121-abi2.0",                 "variant":"musl",  "branding":"",            "buildid":""},
+      {"target":"net9-abi1.0-lns8",   "group":"net9",  "enabled":true,  "major":9,  "abi":"abi1.0", "ref":"v9.0.121-abi1.0",          "release_tag":"v9.0.121-abi1.0",                 "variant":"lns8",  "branding":"",            "buildid":""},
+      {"target":"net10-abi2.0-lns23", "group":"net10", "enabled":true,  "major":10, "abi":"abi2.0", "ref":"v10.0.112-abi2.0",         "release_tag":"v10.0.112-abi2.0",                "variant":"lns23", "branding":"release",     "buildid":"20260822.8"},
+      {"target":"net10-abi2.0-musl",  "group":"net10", "enabled":true,  "major":10, "abi":"abi2.0", "ref":"v10.0.112-abi2.0",         "release_tag":"v10.0.112-abi2.0",                "variant":"musl",  "branding":"release",     "buildid":"20260822.8"},
+      {"target":"net10-abi1.0-lns8",  "group":"net10", "enabled":true,  "major":10, "abi":"abi1.0", "ref":"v10.0.112-abi1.0",         "release_tag":"v10.0.112-abi1.0",                "variant":"lns8",  "branding":"release",     "buildid":"20260822.8"},
+      {"target":"net11-abi2.0-lns23", "group":"net11", "enabled":true,  "major":11, "abi":"abi2.0", "ref":"v11.0.100-rc.1.26425.128-abi2.0", "release_tag":"v11.0.100-rc.1.26425.128-abi2.0", "variant":"lns23", "branding":"repodefault", "buildid":"20260825.28"},
+      {"target":"net11-abi2.0-musl",  "group":"net11", "enabled":true,  "major":11, "abi":"abi2.0", "ref":"v11.0.100-rc.1.26425.128-abi2.0", "release_tag":"v11.0.100-rc.1.26425.128-abi2.0", "variant":"musl",  "branding":"repodefault", "buildid":"20260825.28"},
+      {"target":"net11-abi1.0-lns8",  "group":"net11", "enabled":false, "major":11, "abi":"abi1.0", "ref":"v11.0.100-rc.1.26425.128-abi1.0", "release_tag":"v11.0.100-rc.1.26425.128-abi1.0", "variant":"lns8",  "branding":"repodefault", "buildid":"20260825.28"}
+    ]
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - name: linux
-            libc: glibc
-            docker_tag: azurelinux-3.0-net10.0-cross-loongarch64-lns23
-          - name: linux-musl
-            libc: musl
-            docker_tag: azurelinux-3.0-net10.0-cross-loongarch64-musl
+  # 按 inputs.target 过滤目标表，生成 build / release 两个矩阵
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      releases: ${{ steps.gen.outputs.releases }}
+      has_targets: ${{ steps.gen.outputs.has_targets }}
+    steps:
+    - id: gen
+      run: |
+        set -euo pipefail
+
+        # variant -> os / rid / docker_tag 统一推导，避免逐条重复和 linux-msul 这类拼写错误
+        printf '%s' "$TARGETS" | jq -c \
+          --arg g '${{ inputs.target }}' '
+            map(. + {
+              os:         (if .variant == "musl" then "linux-musl" else "linux" end),
+              rid:        (if .variant == "musl" then "linux-musl-loongarch64" else "linux-loongarch64" end),
+              docker_tag: ("azurelinux-3.0-net10.0-cross-loongarch64-" + .variant)
+            })
+            | map(select(.enabled))
+            # 一致性校验（只查启用的条目；给未就绪分支留的占位行（enabled:false）不参与）：
+            #   1) 同一个 ref 不得同时用于 ABI1.0 / ABI2.0 —— 否则同一份分支会被发成两个 ABI
+            #   2) release_tag 必须以 -<abi> 结尾 —— 否则 tag 与产物 ABI 不符
+            # 两类错误都会让 prepare 直接失败，而不是发出一个贴错标签的 Release
+            | ([.[] | . as $t | select($t.release_tag | endswith("-" + $t.abi) | not) | $t.target]) as $bad_tag
+            | (group_by(.ref) | [.[] | select((map(.abi) | unique | length) > 1) | .[0].ref]) as $bad_ref
+            | if ($bad_ref | length) > 0 then
+                error("同一 ref 被用于多个 ABI: " + ($bad_ref | join(", ")))
+              elif ($bad_tag | length) > 0 then
+                error("release_tag 后缀与 abi 不一致: " + ($bad_tag | join(", ")))
+              else . end
+            | map(select($g == "all" or .group == $g))
+          ' > matrix.json
+
+        # 每个 release_tag 一个 Release；expect 为该 Release 应有的变体，用于校验产物完整性
+        # latest：仅当本次运行为「唯一一个非 rc 的默认（ABI2.0）Release」时才打 Latest 标记，
+        #         多版本同时构建时一律不标记，避免 Latest 落到不确定的版本上
+        jq -c 'group_by(.release_tag) | map({
+            release_tag: .[0].release_tag,
+            group:       .[0].group,
+            abi:         .[0].abi,
+            prerelease:  (.[0].release_tag | contains("-rc.") or contains("-preview.")),
+            is_default:  (.[0].release_tag | contains("-abi1.0") | not),
+            expect:      (map(.variant) | sort)
+          })
+          | ([.[] | select((.prerelease | not) and .is_default)] | length) as $n
+          | {include: map(. + {latest: ($n == 1 and (.prerelease | not) and .is_default)})}
+        ' matrix.json > releases.json
+
+        echo "has_targets=$(jq 'length > 0' matrix.json)" >> "$GITHUB_OUTPUT"
+        echo "matrix={\"include\":$(cat matrix.json)}" >> "$GITHUB_OUTPUT"
+        echo "releases=$(cat releases.json)" >> "$GITHUB_OUTPUT"
+        echo "--- 构建矩阵 ---"; cat matrix.json
+        echo "--- 发布矩阵 ---"; cat releases.json
+
+        {
+          echo "### 本次构建目标"
+          echo
+          jq -r '.[] | "- `\(.ref)` × \(.variant) → Release `\(.release_tag)`"' matrix.json
+        } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.has_targets == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
     permissions:
-      contents: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
     - name: Maximize build space
       uses: AdityaGarg8/remove-unwanted-software@v4.1
@@ -48,74 +141,223 @@ jobs:
         remove-codeql: 'true'
         remove-cached-tools: 'true'
 
-    - name: Clone repository
+    - name: Clone VMR
+      id: clone
       run: |
-        git clone --single-branch --depth 1 -b ${{ inputs.branch }} https://github.com/${{ inputs.fork }}/dotnet
+        set -euo pipefail
+        git clone --single-branch --depth 1 --branch '${{ matrix.ref }}' \
+          'https://github.com/${{ inputs.fork }}/dotnet' "$GITHUB_WORKSPACE/dotnet"
+        echo "commit=$(git -C "$GITHUB_WORKSPACE/dotnet" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-    - name: Apply patches
+    # 9.0/10.0 分支里已维护这两处，这里统一（幂等）再执行一次，对已有分支无影响
+    - name: Apply common LoongArch fixes
+      working-directory: ${{ github.workspace }}/dotnet
       run: |
-        cd dotnet
+        set -euo pipefail
 
-        # Fix build #4043 
-        # curl https://patch-diff.githubusercontent.com/raw/dotnet/dotnet/pull/4043.diff | git apply
+        # 1) KeepNativeSymbols: true -> false
+        bp=src/runtime/Directory.Build.props
+        if [ -f "$bp" ]; then
+          sed -i "/<KeepNativeSymbols/ s/true/false/g" "$bp"
+          if grep '<KeepNativeSymbols' "$bp" | grep -q true; then
+            echo "::error::$bp 中 KeepNativeSymbols 仍为 true"
+            exit 1
+          fi
+        else
+          echo "::warning::$bp 不存在，跳过 KeepNativeSymbols 修正"
+        fi
 
-        # KeepNativeSymbols=true
-        sed -i "/<KeepNativeSymbols/ s/true/false/g" src/runtime/Directory.Build.props
-
-        cp -v src/runtime/src/libraries/System.IO.Ports/pkg/runtime.linux-x64.runtime.native.System.IO.Ports.proj src/runtime/src/libraries/System.IO.Ports/pkg/runtime.linux-loongarch64.runtime.native.System.IO.Ports.proj
-        cp -v src/runtime/src/libraries/System.IO.Ports/pkg/runtime.linux-x64.runtime.native.System.IO.Ports.proj src/runtime/src/libraries/System.IO.Ports/pkg/runtime.linux-musl-loongarch64.runtime.native.System.IO.Ports.proj
+        # 2) System.IO.Ports 缺少 loongarch64 / musl-loongarch64 的 runtime proj
+        d=src/runtime/src/libraries/System.IO.Ports/pkg
+        if [ -f "$d/runtime.linux-x64.runtime.native.System.IO.Ports.proj" ]; then
+          for v in linux linux-musl; do
+            cp -v "$d/runtime.linux-x64.runtime.native.System.IO.Ports.proj" \
+                  "$d/runtime.$v-loongarch64.runtime.native.System.IO.Ports.proj"
+          done
+        fi
+        for v in linux linux-musl; do
+          [ -f "$d/runtime.$v-loongarch64.runtime.native.System.IO.Ports.proj" ] \
+            || { echo "::error::$d/runtime.$v-loongarch64.runtime.native.System.IO.Ports.proj 缺失"; exit 1; }
+        done
 
     - name: Build
       run: |
-        docker run --platform linux/amd64 --rm -v${{ github.workspace }}/dotnet:/dotnet -w /dotnet -e ROOTFS_DIR=/crossrootfs/loongarch64 \
-          ghcr.io/chenguohui/dotnet-buildtools-prereqs-docker:${{ matrix.docker_tag }} \
-            ./build.sh --clean-while-building --prep -sb --os ${{ matrix.name }} --rid ${{ matrix.name }}-loongarch64 \
-              --arch loongarch64 --branding ${{ inputs.branding }} -p:OfficialBuildId=${{ inputs.buildid }}
+        set -euo pipefail
 
-    - name: List assets directory
+        case '${{ matrix.major }}' in
+          9)
+            # .NET 9 的 VMR 用 prep-source-build.sh 准备源，RID 由 CrossBuild/PortableBuild 推导
+            CMD="./prep-source-build.sh && ./build.sh -c Release -sb --os ${{ matrix.os }} --arch loongarch64 --clean-while-building -- /p:CrossBuild=true /p:PortableBuild=true"
+            ;;
+          10|11)
+            CMD="./build.sh --clean-while-building --prep -sb --os ${{ matrix.os }} --rid ${{ matrix.rid }} --arch loongarch64 --branding ${{ matrix.branding }} -p:OfficialBuildId=${{ matrix.buildid }}"
+            ;;
+          *)
+            echo "::error::major=${{ matrix.major }} 没有对应的构建命令"
+            exit 1
+            ;;
+        esac
+
+        echo "构建命令: $CMD"
+        docker run --platform linux/amd64 --rm \
+          -v "$GITHUB_WORKSPACE/dotnet":/dotnet -w /dotnet \
+          -e ROOTFS_DIR=/crossrootfs/loongarch64 \
+          "ghcr.io/chenguohui/dotnet-buildtools-prereqs-docker:${{ matrix.docker_tag }}" \
+          bash -c "$CMD"
+
+    - name: List assets
       run: |
-        find "${{ github.workspace }}/dotnet/artifacts"
+        find "$GITHUB_WORKSPACE/dotnet/artifacts/assets" -name '*.tar.gz' -printf '%s\t%p\n' | sort -k2
+
+    # 随产物一起上传，release notes 里记录 ref / commit，便于回溯
+    - name: Write build info
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/build-info"
+        cat > "$GITHUB_WORKSPACE/build-info/build-info-${{ matrix.variant }}.txt" <<EOF
+        ref:     ${{ matrix.ref }}
+        commit:  ${{ steps.clone.outputs.commit }}
+        variant: ${{ matrix.variant }} (${{ matrix.abi }})
+        os/rid:  ${{ matrix.os }} / ${{ matrix.rid }}
+        image:   ghcr.io/chenguohui/dotnet-buildtools-prereqs-docker:${{ matrix.docker_tag }}
+        EOF
+        cat "$GITHUB_WORKSPACE/build-info/build-info-${{ matrix.variant }}.txt"
+
+    # 10.0/11.0 的产物在 Release/Sdk/<version>/ 下，Release/ 下还留有一份同名副本；
+    # 9.0 只有 Release/ 下的一份。递归 glob 会把两份都收进 artifact，
+    # 而 gh 是按文件名上传的，同名第二份会被 GitHub 拒（HTTP 404），所以这里只解析出唯一路径。
+    - name: Resolve asset paths
+      id: assets
+      run: |
+        set -euo pipefail
+        root="$GITHUB_WORKSPACE/dotnet/artifacts/assets"
+
+        pick() {   # 优先 Release/Sdk/*/，没有（9.0）则退回 Release/
+          if compgen -G "$root/Release/Sdk/*/$1" > /dev/null; then
+            echo "$root/Release/Sdk/*/$1"
+          else
+            echo "$root/Release/$1"
+          fi
+        }
+        sdk=$(pick 'dotnet-sdk-*.tar.gz')
+        psa=$(pick 'Private.SourceBuilt.Artifacts.*.tar.gz')
+        echo "sdk_glob=$sdk" >> "$GITHUB_OUTPUT"
+        echo "psa_glob=$psa" >> "$GITHUB_OUTPUT"
+        echo "SDK 产物:        $(compgen -G "$sdk" | tr '\n' ' ')"
+        echo "SourceBuilt 产物: $(compgen -G "$psa" | tr '\n' ' ')"
+
     - name: Upload .NET
       uses: actions/upload-artifact@v4
       with:
-        name: dotnet-sdk-${{ matrix.name }}
+        name: assets--${{ matrix.release_tag }}--${{ matrix.variant }}
+        retention-days: 7
+        compression-level: 0  # 产物本身已压缩
+        if-no-files-found: error
         path: |
-          ${{ github.workspace }}/dotnet/artifacts/assets/Release/Sdk/*/dotnet-sdk-*.tar.gz
-          ${{ github.workspace }}/dotnet/artifacts/assets/Release/Private.SourceBuilt.Artifacts.*.tar.gz
+          ${{ steps.assets.outputs.sdk_glob }}
+          ${{ steps.assets.outputs.psa_glob }}
+          ${{ github.workspace }}/build-info/build-info-${{ matrix.variant }}.txt
 
+  # 每个 release_tag 一个 GitHub Release；ABI1.0 / ABI2.0 天然分开在各自的 tag 下
+  # 某个 target 构建失败只影响它自己的 Release（失败的会跳过并告警，不会误发半份产物）
   release:
-    needs: build
+    needs: [prepare, build]
+    if: ${{ always() && inputs.release && needs.prepare.outputs.has_targets == 'true' && needs.build.result != 'cancelled' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.releases) }}
     steps:
     - name: Download artifacts
       uses: actions/download-artifact@v4
+      continue-on-error: true  # 构建失败时该 tag 没有产物，交给下一步判断
       with:
-        path: artifacts
+        pattern: assets--${{ matrix.release_tag }}--*
+        path: ${{ github.workspace }}/release-assets
+        merge-multiple: true
 
     - name: Make release
-      run: |
-        sudo apt install -y hub
-        # hub(1) requires release to be created inside a git repo
-        git clone https://${{ secrets.CLONE_TOKEN }}:x-oauth-basic@github.com/${{ github.repository }}.git repo
-        cd repo
-        sdk_paths=$(find ${{ github.workspace }}/artifacts -name 'dotnet-sdk-*.tar.gz')
-        psa_paths=$(find ${{ github.workspace }}/artifacts -name 'Private.SourceBuilt.Artifacts.*.tar.gz')
-        artifacts=""
-        for sdk_path in $sdk_paths; do
-          sdk_filename=$(basename "$sdk_path")
-          # Extract version: strip prefix/suffix to get e.g. "10.0.100-preview.5.25277.114"
-          sdk_version=$(echo "$sdk_filename" | sed -E 's/dotnet-sdk-([^-]+(-[^-]+)*)-linux-.+\.tar\.gz/\1/')
-          artifacts="$artifacts -a $sdk_path"
-          tag_name="$sdk_version"
-        done
-        for psa_path in $psa_paths; do
-          artifacts="$artifacts -a $psa_path"
-        done
-        echo "tag_name: $tag_name"
-        echo "artifacts: $artifacts"
-        # docs: https://hub.github.com/hub-release.1.html
-        hub release create $artifacts --prerelease -m "$tag_name" "$tag_name"
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ github.token }}
+        OVERWRITE: ${{ inputs.overwrite }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${{ github.workspace }}/release-assets"
+        cd "${{ github.workspace }}/release-assets"
+
+        # build-info-*.txt 只用于完整性校验和 release notes，不作为资产上传
+        # 按文件名去重：gh 以文件名作为 asset 名，同名传两次会被 GitHub 拒绝（HTTP 404）
+        declare -A seen=()
+        assets=()
+        while IFS= read -r f; do
+          b=${f##*/}
+          if [ -n "${seen[$b]:-}" ]; then
+            echo "::warning::同名产物 ${f#./} 已跳过（保留 ${seen[$b]#./}）"
+            [ "$(stat -c%s "$f")" = "$(stat -c%s "${seen[$b]}")" ] \
+              || echo "::warning::注意：二者大小不同，${f#./} 的内容未被上传"
+            continue
+          fi
+          seen[$b]=$f
+          assets+=("$f")
+        done < <(find . -type f ! -name 'build-info-*.txt' | LC_ALL=C sort)
+
+        if [ ${#assets[@]} -eq 0 ]; then
+          echo "::warning::${{ matrix.release_tag }} 没有产物（构建失败或被跳过），不创建 Release"
+          exit 0
+        fi
+
+        # 产物完整性校验：该 Release 应有的变体必须都在，避免发出半份版本
+        missing=""
+        for v in ${{ join(matrix.expect, ' ') }}; do
+          find . -name "build-info-$v.txt" | grep -q . || missing="$missing $v"
+        done
+        if [ -n "$missing" ]; then
+          echo "::warning::${{ matrix.release_tag }} 缺少变体$missing，跳过发布"
+          exit 0
+        fi
+
+        if ! printf '%s\n' "${assets[@]}" | grep -q 'dotnet-sdk-.*\.tar\.gz'; then
+          echo "::error::${{ matrix.release_tag }} 没有 dotnet-sdk-*.tar.gz 产物，拒绝发布"
+          exit 1
+        fi
+
+        notes=$(mktemp)
+        {
+          echo "LoongArch64 .NET SDK \`${{ matrix.release_tag }}\`"
+          echo
+          echo "- ABI: **${{ matrix.abi }}**"
+          echo "- 产物:"
+          for f in "${assets[@]}"; do
+            echo "  - \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"
+          done
+          echo "- 构建信息:"
+          echo
+          echo '  ```'
+          find . -name 'build-info-*.txt' | sort | xargs cat | sed 's/^/  /'
+          echo '  ```'
+        } > "$notes"
+        cat "$notes"
+
+        args=( --title "${{ matrix.release_tag }}" --notes-file "$notes" )
+        if [ '${{ matrix.prerelease }}' = 'true' ]; then args+=( --prerelease ); fi
+        if [ '${{ matrix.latest }}' = 'true' ]; then args+=( --latest ); else args+=( --latest=false ); fi
+
+        # 已存在的 Release：资产与本次完全一致才算成功过（幂等跳过）；
+        # 否则视为上次跑了一半（例如上传中途失败留下的残缺 Release），删掉重建
+        mapfile -t want < <(printf '%s\n' "${assets[@]}" | sed 's#.*/##' | LC_ALL=C sort -u)
+        if gh release view "${{ matrix.release_tag }}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          is_draft=$(gh release view "${{ matrix.release_tag }}" -R "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)
+          mapfile -t have < <(gh release view "${{ matrix.release_tag }}" -R "$GITHUB_REPOSITORY" \
+                                --json assets -q '.assets[].name' | LC_ALL=C sort -u)
+          if [ "$OVERWRITE" != "true" ] && [ "$is_draft" = "false" ] && [ "${want[*]}" = "${have[*]}" ]; then
+            echo "Release ${{ matrix.release_tag }} 已存在且资产一致（${#have[@]} 个），跳过"
+            exit 0
+          fi
+          reason="资产不一致（现有 ${#have[@]} 个: ${have[*]:-无}）"
+          if [ "$is_draft" = "true" ]; then reason="仍是 draft（上次上传未完成）"; fi
+          echo "::warning::Release ${{ matrix.release_tag }} 已存在但${reason}，删除重建"
+          gh release delete "${{ matrix.release_tag }}" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag
+        fi
+
+        gh release create "${{ matrix.release_tag }}" -R "$GITHUB_REPOSITORY" "${args[@]}" "${assets[@]}"
