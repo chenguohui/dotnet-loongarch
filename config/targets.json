@@ -2,7 +2,7 @@
   "_comment": [
     "构建目标表 —— build.yml / selfcheck.yml 共用的唯一事实来源。",
     "",
-    "targets[]  每条 = 一个 (ref × 构建变体)。同一个 release_tag 的多个变体（如 lns23 + musl）",
+    "targets[]  每条 = 一个 (ref × 构建变体)。同一个 release_tag 的多个变体（如 lns23 + alpine）",
     "           合并发布到同一个 GitHub Release。",
     "  target    构建 job 标识，同时用于 artifact 名",
     "  group     net9 / net10 / net11 —— workflow_dispatch 的 target 输入按此过滤",
@@ -18,17 +18,19 @@
     "  sdk_version  ref 去掉前缀 v 与结尾 -abiX.0；用于校验产物版本，可显式覆盖",
     "  release_tag  v<sdk_version>-<abi>；可显式覆盖为自定义 tag",
     "  另外 prepare 会校验（只查启用的条目）：variant/abi 必须能在下面两张表里查到；",
-    "  同一个 ref 只能对应唯一的 (group, abi)（同一 ref 的多个变体如 lns23+musl 正常）；",
+    "  同一个 ref 只能对应唯一的 (group, abi)（同一 ref 的多个变体如 lns23+alpine 正常）；",
     "  release_tag 后缀必须与 abi 一致",
     "",
     "abis 表：",
     "  elf_flags    ABI 判据，readelf -h 的 Flags（构建时门禁与发布后自检共用，需 LC_ALL=C）",
     "",
     "variants 表：",
+    "  变体名 alpine 指 musl libc 的那套构建（镜像基于 alpine）。rid 与 docker_tag 里的",
+    "  musl 是真实的 RID / 镜像名，不随变体名走 —— 改的是表里的键，不是产物名。",
     "  os / rid / docker_tag        构建与产物命名用",
     "  glibc_max                    该变体 sysroot 的 glibc 上限；空 = 不检查",
     "  glibcxx_max                  该变体 sysroot 的 libstdc++ 符号上限；空 = 不检查。",
-    "                               musl 工具链不做符号版本化 —— musl 产物里一个 GLIBCXX_ 符号",
+    "                               musl 工具链不做符号版本化 —— alpine 产物里一个 GLIBCXX_ 符号",
     "                               都没有（实测 11.0.100-rc.1），所以留空；glibc 变体取实测上限",
     "",
     "只在 test.yml / nupkg.yml 里用到的键（binfmt_image、test_image、nuget_source 等）不在这份",
@@ -59,7 +61,7 @@
       "glibc_max": "2.38",
       "glibcxx_max": "3.4.30"
     },
-    "musl": {
+    "alpine": {
       "os": "linux-musl",
       "rid": "linux-musl-loongarch64",
       "docker_tag": "azurelinux-3.0-net10.0-cross-loongarch64-musl",
@@ -70,15 +72,15 @@
 
   "targets": [
     {"target": "net9-abi2.0-lns23", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "lns23", "ref": "v9.0.121-abi2.0", "branding": "", "buildid": ""},
-    {"target": "net9-abi2.0-musl", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "musl", "ref": "v9.0.121-abi2.0", "branding": "", "buildid": ""},
+    {"target": "net9-abi2.0-alpine", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "alpine", "ref": "v9.0.121-abi2.0", "branding": "", "buildid": ""},
     {"target": "net9-abi1.0-lns8", "group": "net9", "enabled": true, "major": 9, "abi": "abi1.0", "variant": "lns8", "ref": "v9.0.121-abi1.0", "branding": "", "buildid": ""},
 
     {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.112-abi2.0", "branding": "release", "buildid": "20260822.8"},
-    {"target": "net10-abi2.0-musl", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "musl", "ref": "v10.0.112-abi2.0", "branding": "release", "buildid": "20260822.8"},
+    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.112-abi2.0", "branding": "release", "buildid": "20260822.8"},
     {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.112-abi1.0", "branding": "release", "buildid": "20260822.8"},
 
     {"target": "net11-abi2.0-lns23", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "lns23", "ref": "v11.0.100-rc.1.26425.128-abi2.0", "branding": "repodefault", "buildid": "20260825.28"},
-    {"target": "net11-abi2.0-musl", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "musl", "ref": "v11.0.100-rc.1.26425.128-abi2.0", "branding": "repodefault", "buildid": "20260825.28"},
+    {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-rc.1.26425.128-abi2.0", "branding": "repodefault", "buildid": "20260825.28"},
     {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": false, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.1.26425.128-abi1.0", "branding": "repodefault", "buildid": "20260825.28"}
   ]
 }

@@ -32,7 +32,7 @@ on:
 # ─────────────────────────────────────────────────────────────────────────────
 # 构建目标表在 config/targets.json（build.yml / selfcheck.yml 共用）：
 #   targets[]  每条 = 一个 (ref × 构建变体)；同一个 release_tag 的多条变体
-#              （如 lns23 + musl）合并发布到同一个 GitHub Release
+#              （如 lns23 + alpine）合并发布到同一个 GitHub Release
 #   abis[]     elf_flags —— 按 ABI 区分
 #   variants[] os / rid / docker_tag / glibc_max / glibcxx_max —— 按构建变体区分
 # release_tag 与 sdk_version 由 ref + abi 推导（可显式覆盖）。
@@ -70,7 +70,7 @@ jobs:
             #      产出一个没有 docker_tag / elf_flags 的目标（拼错 lns23 -> lns3 之类）
             #   2) 同一个 ref 只能对应唯一的 (group, abi) —— 一个分支只可能是一个版本的
             #      一个 ABI；同一 ref 横跨版本或 ABI 都是抄错了（v9 的 ref 填进 net10 条目、
-            #      或 ABI1.0 的 ref 配 ABi2.0）。同一 ref 的多个变体（lns23 + musl）是正常的
+            #      或 ABI1.0 的 ref 配 ABi2.0）。同一 ref 的多个变体（lns23 + alpine）是正常的
             #   3) release_tag 必须以 -<abi> 结尾 —— 否则 tag 与产物 ABI 不符
             # 都会让 prepare 直接失败，而不是发出一个贴错标签的 Release
             | ([.[] | select((.docker_tag // "") == "" or (.elf_flags // "") == "" or (.rid // "") == "") | .target]) as $bad_join
@@ -196,10 +196,10 @@ jobs:
             # .NET 9 的 VMR 用 prep-source-build.sh 准备源；9.0 的 build.sh 没有 --prep/--rid，
             # 目标 RID 只能显式给成 MSBuild 属性：
             #   glibc 变体（lns8 / lns23）：CrossBuild + PortableBuild 就够
-            #   musl 变体（alpine）：还必须给 HostRid / PortableRid / TargetArchitecture，
+            #   alpine 变体（musl libc）：还必须给 HostRid / PortableRid / TargetArchitecture，
             #     否则构建出的是 glibc 产物，文件名也变成 linux-loongarch64 —— 与 lns23 的
             #     同名产物在 release job 合并时互相覆盖，最后发出哪一份取决于顺序
-            #     （v9.0.121-abi2.0 里那份名叫 linux-loongarch64、实际是 musl 的资产即由此而来）
+            #     （v9.0.121-abi2.0 里那份名叫 linux-loongarch64、实际是 alpine 的资产即由此而来）
             props="/p:CrossBuild=true /p:PortableBuild=true"
             if [ '${{ matrix.os }}' = 'linux-musl' ]; then
               props="$props /p:HostRid=${{ matrix.rid }} /p:PortableRid=${{ matrix.rid }} /p:TargetArchitecture=loongarch64"
@@ -262,7 +262,7 @@ jobs:
         echo "SDK 产物:        $(compgen -G "$sdk" | tr '\n' ' ')"
         echo "SourceBuilt 产物: $(compgen -G "$psa" | tr '\n' ' ')"
 
-        # 产物名必须与本变体的 RID 相符。构建命令少给 RID 属性时（例如 .NET 9 的 musl
+        # 产物名必须与本变体的 RID 相符。构建命令少给 RID 属性时（例如 .NET 9 的 alpine
         # 变体少了 HostRid/PortableRid），产出的是另一个 RID 的包、名字也跟着错，
         # 而 release job 的完整性校验查的是 build-info-<变体>.txt —— 那个文件只要 job
         # 跑过就有，查不出这种错。等到合并时才发现，就只剩两个同名产物互相覆盖了。

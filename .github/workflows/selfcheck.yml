@@ -195,7 +195,7 @@ jobs:
           # 该发的变体都发出来了吗 —— 「发了一半」在 Release 页面上看不出来，只有拿
           # 配置表的期望集与实际资产对一遍才知道。这里只能按**资产文件名**归类（包内
           # 是什么得等 check job 解包才知道，例如 v9.0.121-abi2.0 那份名叫
-          # linux-loongarch64 的资产实际是 musl 构建）—— 所以措辞只说文件名；
+          # linux-loongarch64 的资产实际是 alpine 构建）—— 所以措辞只说文件名；
           # 真正的「缺哪个变体」在 report job 里按实测解释器归位后补行。
           exp=${TAG_EXPECT[$tag]:-}
           if [ -z "$exp" ]; then
@@ -361,7 +361,7 @@ jobs:
 
         # 实有：按**实测解释器**给资产归位。不能只看文件名 —— 文件名会说谎：
         # v9.0.121-abi2.0 里那份 dotnet-sdk-9.0.121-linux-loongarch64.tar.gz 实测
-        # 解释器是 musl，真身是 alpine 变体，所以缺的是 lns23 而不是 musl。
+        # 解释器是 musl（libc 家族），真身是 alpine 变体，所以缺的是 lns23 而不是 alpine。
         # 归位后行本身也改挂到真身变体上（解释器列的 ❌ 仍在，指出文件名不符）。
         declare -A PRESENT=()
         notes=()

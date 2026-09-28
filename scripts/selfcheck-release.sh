@@ -17,7 +17,7 @@
 #
 # 参数：
 #   --sdk          SDK tar.gz 路径（必填）
-#   --variant      变体名（lns8/lns23/musl），用于报告（必填）
+#   --variant      变体名（lns8/lns23/alpine），用于报告（必填）
 #   --abi          abi1.0 / abi2.0，用于报告（必填）
 #   --rid          linux-loongarch64 / linux-musl-loongarch64（必填）—— 解释器检查的判据
 #   --elf-flags    期望的 ELF e_flags（0x3 / 0x43，必填）—— config/targets.json 的 abis[].elf_flags
@@ -263,7 +263,7 @@ else
 fi
 
 # 解释器：只对可执行文件有意义。它抓的是「资产名字与内容不符」——
-# v9.0.121-abi2.0 那份 \`*-linux-loongarch64.tar.gz\` 实际是 musl 构建，就是这一类。
+# v9.0.121-abi2.0 那份 \`*-linux-loongarch64.tar.gz\` 实际是 alpine 变体的构建，就是这一类。
 if [ -z "$M_INTERP" ]; then
   warn "ELF 解释器" "\`./dotnet\` 没有 PT_INTERP（静态链接？），无法核对 RID"
 elif [ "$interp_bad" -eq 0 ]; then
