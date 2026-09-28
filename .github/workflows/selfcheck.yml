@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tags:
-        description: '要体检的 Release tag（空格或逗号分隔）；留空 = 最近 5 个'
+        description: '要体检的 Release tag（空格或逗号分隔）；留空 = config/targets.json 里 enabled 的全部'
         required: false
         type: string
         default: ''
@@ -40,7 +40,9 @@ permissions:
 
 jobs:
   # 列出「哪些 Release 的哪些 SDK 资产要体检」，顺带把 config/targets.json 里的期望值
-  # （elf_flags / glibcxx_max / glibc_max）查出来放进矩阵 —— check job 只认矩阵，不再读配置
+  # （elf_flags / glibcxx_max / glibc_max）查出来放进矩阵 —— check job 只认矩阵，不再读配置。
+  # 期望集（应该存在哪些 (Release, 变体)）同样以配置表 enabled 的行为准，而不是看构建
+  # 那边发了什么 —— 自检要找的恰恰是「该发的没发 / 发出来的不是这个变体」。
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -69,28 +71,55 @@ jobs:
           exit 1
         fi
 
+        # ── 0. 期望集：config/targets.json 里 enabled: true 的行 ──────────────
+        # 「这个 Release 应该有哪几个变体」只认配置表，不看构建实际发了什么。推导规则与
+        # build.yml 的 prepare 逐字相同（sdk_version 去掉 ref 的 v 前缀与 -abiX.0 后缀、
+        # release_tag = v<sdk_version>-<abi>；条目里显式写了就用显式的）。
+        # 为什么必须看 enabled：net11 的 lns8 是「分支未就绪」的占位行（enabled: false），
+        # 把它算成期望值会让每次体检都报一个不存在的缺失。
+        exp_tsv=$(jq -r '
+          .variants as $V
+          | .targets
+          | map(select(.enabled))
+          | map(. + { sdk_version: (.sdk_version // (.ref | sub("^v"; "") | sub("-abi[12]\\.0$"; ""))) })
+          | map(. + { release_tag: (.release_tag // ("v" + .sdk_version + "-" + .abi)) })
+          | .[]
+          | [.release_tag, .variant, $V[.variant].rid] | @tsv
+        ' config/targets.json) || true
+        if [ -z "${exp_tsv//[[:space:]]/}" ]; then
+          echo "::error::config/targets.json 里没有 enabled 的条目 —— 期望集为空，判不出「缺了哪个变体」"
+          exit 1
+        fi
+
+        declare -A TAG_EXPECT=()   # release_tag → 应有的变体（空格分隔，已排序）
+        while IFS=$'\t' read -r t v _; do
+          [ -n "$t" ] || continue
+          TAG_EXPECT[$t]="${TAG_EXPECT[$t]:-}${TAG_EXPECT[$t]:+ }$v"
+        done <<< "$exp_tsv"
+        for t in "${!TAG_EXPECT[@]}"; do
+          TAG_EXPECT[$t]=$(printf '%s\n' ${TAG_EXPECT[$t]} | LC_ALL=C sort -u | paste -sd' ' -)
+        done
+        mapfile -t cfg_tags < <(printf '%s\n' "${!TAG_EXPECT[@]}" | LC_ALL=C sort)
+
         # ── 1. 本次要体检哪些 Release ────────────────────────────────────────
         # workflow_run：唯一来源是 build.yml 的 prepare 留下的 release-plan
         #   （本次意图发布的 tag）。读不到就是「这次构建没走到发布」—— 什么都不做，
         #   **不要**回退去查历史 Release，那会把早就体检过的版本重查一遍。
         #   实际发没发以 gh release 为准，下一步逐个核对。
-        # 手动：输入里给；留空则取最近 5 个。
+        # 手动：输入里给；留空则体检配置表里 enabled 的全部 Release。
         tags=()
-        declare -A EXPECT=()   # tag → 该 Release 应有的变体（逗号分隔，排好序）；只有读工件时才有
         if [ -n "${RUN_ID:-}" ]; then
           rm -rf plan
           if gh run download "$RUN_ID" -R "$REPO" -n release-plan -D plan 2>/dev/null \
              && [ -f plan/releases.json ]; then
             mapfile -t tags < <(jq -r '.include[].release_tag' plan/releases.json)
-            while IFS=$'\t' read -r t e; do EXPECT[$t]=$e; done \
-              < <(jq -r '.include[] | [.release_tag, (.expect | join(","))] | @tsv' plan/releases.json)
           else
             echo "::warning::本次构建没有 release-plan 工件，跳过（构建在 prepare 之前就失败？）"
           fi
         elif [ -n "${TAGS_INPUT//[[:space:]]/}" ]; then
           read -r -a tags <<< "${TAGS_INPUT//,/ }"
         else
-          mapfile -t tags < <(gh release list -R "$REPO" -L 5 --json tagName -q '.[].tagName')
+          tags=("${cfg_tags[@]:-}")
         fi
         echo "待体检 Release：${tags[*]:-<无>}"
 
@@ -163,17 +192,18 @@ jobs:
             tag_variants+=("$variant")
           done <<< "$sdks"
 
-          # 该发的变体都发出来了吗 —— 「发了一半」在 Release 页面上看不出来，
-          # 只有拿配置表的 expect 与实际资产对一遍才知道。这里只能按**资产文件名**
-          # 归类（包内是什么得等 check job 解包才知道，例如 v9.0.121-abi2.0 那份
-          # 名叫 linux-loongarch64 的资产实际是 musl 构建）—— 所以措辞只说文件名。
-          # 只有 workflow_run 路径有 expect：手动体检历史 Release 时不判，
-          # 那时的 expect 未必是当初发布时的配置。
-          exp=${EXPECT[$tag]:-}
-          if [ -n "$exp" ]; then
-            got=$(printf '%s\n' "${tag_variants[@]}" | grep . | LC_ALL=C sort -u | paste -sd, -)
+          # 该发的变体都发出来了吗 —— 「发了一半」在 Release 页面上看不出来，只有拿
+          # 配置表的期望集与实际资产对一遍才知道。这里只能按**资产文件名**归类（包内
+          # 是什么得等 check job 解包才知道，例如 v9.0.121-abi2.0 那份名叫
+          # linux-loongarch64 的资产实际是 musl 构建）—— 所以措辞只说文件名；
+          # 真正的「缺哪个变体」在 report job 里按实测解释器归位后补行。
+          exp=${TAG_EXPECT[$tag]:-}
+          if [ -z "$exp" ]; then
+            echo "::warning::$tag 不在 config/targets.json 的 enabled 条目里，没有期望值可对（仍逐个资产体检）"
+          else
+            got=$(printf '%s\n' "${tag_variants[@]:-}" | grep . | LC_ALL=C sort -u | paste -sd' ' -)
             [ "$got" = "$exp" ] \
-              || echo "::warning::$tag 里 SDK 资产的文件名只对应变体 ${got:-<无>}，配置表期望 $exp"
+              || echo "::warning::$tag 的资产文件名只对应变体 ${got:-<无>}，配置表期望 $exp"
           fi
         done
 
@@ -292,6 +322,10 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+
     - uses: actions/download-artifact@v4
       continue-on-error: true   # 全部 check 都没跑成时这里会空，交给下一步判断
       with:
@@ -306,6 +340,63 @@ jobs:
         mapfile -t rows < <(find results -name 'row-*.json' 2>/dev/null | LC_ALL=C sort)
         echo "收到 ${#rows[@]} 份结果"
 
+        # ── 期望集（config 里 enabled 的行）→ 缺哪些变体 ─────────────────────
+        # 「这个 Release 应该有哪几个变体」只看配置表，不看构建实际发了什么。
+        # 推导规则与 build.yml 的 prepare（和本文件 plan job）逐字相同。
+        fam_of() { case "$1" in *musl*) echo musl ;; *) echo glibc ;; esac; }
+        declare -A VAR_RID=() TAG_EXPECT=()
+        while IFS=$'\t' read -r t v r; do
+          [ -n "$t" ] || continue
+          VAR_RID[$v]=$r
+          TAG_EXPECT[$t]="${TAG_EXPECT[$t]:-}${TAG_EXPECT[$t]:+ }$v"
+        done < <(jq -r '
+          .variants as $V
+          | .targets
+          | map(select(.enabled))
+          | map(. + { sdk_version: (.sdk_version // (.ref | sub("^v"; "") | sub("-abi[12]\\.0$"; ""))) })
+          | map(. + { release_tag: (.release_tag // ("v" + .sdk_version + "-" + .abi)) })
+          | .[]
+          | [.release_tag, .variant, $V[.variant].rid] | @tsv
+        ' config/targets.json)
+
+        # 实有：按**实测解释器**给资产归位。不能只看文件名 —— 文件名会说谎：
+        # v9.0.121-abi2.0 里那份 dotnet-sdk-9.0.121-linux-loongarch64.tar.gz 实测
+        # 解释器是 musl，真身是 alpine 变体，所以缺的是 lns23 而不是 musl。
+        # 归位后行本身也改挂到真身变体上（解释器列的 ❌ 仍在，指出文件名不符）。
+        declare -A PRESENT=()
+        notes=()
+        for f in "${rows[@]:-}"; do
+          [ -f "$f" ] || continue
+          t=$(jq -r '.tag' "$f"); v=$(jq -r '.variant // ""' "$f")
+          i=$(jq -r '.interp // ""' "$f")
+          real=$v
+          if [ -n "$i" ] && [ -n "${VAR_RID[$v]:-}" ]; then
+            want=$(fam_of "${VAR_RID[$v]}"); got=$(fam_of "$i")
+            if [ "$want" != "$got" ]; then
+              for cand in ${TAG_EXPECT[$t]:-}; do
+                if [ "$(fam_of "${VAR_RID[$cand]}")" = "$got" ]; then real=$cand; break; fi
+              done
+              if [ "$real" != "$v" ]; then
+                asset=$(jq -r '.asset // ""' "$f")
+                jq -c --arg v "$real" '.variant = $v' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+                notes+=("\`$asset\` 实测解释器是 $got（文件名按 $want 变体命名），已按内容计入 \`$real\`；$t 缺的是 \`$v\`")
+              fi
+            fi
+          fi
+          PRESENT["$t|$real"]=1
+        done
+
+        : > missing.json
+        mapfile -t tags_seen < <(jq -r '.tag' "${rows[@]:-}" 2>/dev/null | LC_ALL=C sort -u)
+        for t in "${tags_seen[@]:-}"; do
+          [ -n "$t" ] || continue
+          for v in ${TAG_EXPECT[$t]:-}; do
+            [ -n "${PRESENT["$t|$v"]:-}" ] && continue
+            jq -nc --arg t "$t" --arg v "$v" '{tag:$t, variant:$v, asset:"", status:"missing"}' >> missing.json
+          done
+        done
+        echo "按配置表补 $(grep -c . missing.json || true) 行「缺失」"
+
         out="sdk-selfcheck-report.md"
         {
           echo "## SDK 自检总表"
@@ -313,36 +404,48 @@ jobs:
           if [ "${#rows[@]}" -eq 0 ]; then
             echo "没有收到任何结果 —— 检查 job 全部没跑成。"
           else
+            files=("${rows[@]}")
+            [ -s missing.json ] && files+=(missing.json)
             jq -s -r '
               sort_by(.tag, .variant)
-              | (["| Release | 变体 | 体积（压缩/解包） | e_flags | 解释器 | GLIBCXX | GLIBC | PE32+ / PE32 | 未 strip | CodeAnalysis | 结论 |",
-                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
-                + [.[] | [
-                    "`\(.tag)`",
-                    .variant,
-                    "\(.size_tar // "—") / \(.size_unpacked // "—")",
-                    (if .status == "error" then "—" elif (.elf_flags_ok == false) then "❌ \(.elf_flags // "?")" else (.elf_flags // "—") end),
-                    (if .status == "error" then "—"
-                     else (if (.interp // "") | test("musl") then "musl" else "glibc" end) as $fam
-                          | if (.interp_ok == false) then "❌ \($fam)" else $fam end
-                     end),
-                    (if .status == "error" then "—" elif (.glibcxx // "") == "" then "—（不检查）" elif (.glibcxx_ok == false) then "❌ \(.glibcxx)" else .glibcxx end),
-                    (if .status == "error" then "—" elif (.glibc // "") == "" then "—（不检查）" elif (.glibc_ok == false) then "❌ \(.glibc)" else .glibc end),
-                    (if .status == "error" then "—" else "\(.pe_total // "—") / \(.pe32 // "—")" end),
-                    (if .status == "error" then "—"
-                     elif (.unstripped // 0) > 0 then "⚠️ \(.unstripped)" else "0" end),
-                    (if .status == "error" then "—"
-                     elif (.codeanalysis // "") == "" then "—（未查）"
-                     elif (.codeanalysis_ok == false) then "❌ \(.codeanalysis)" else .codeanalysis end),
-                    (if .status == "error" then "❌ 检查失败"
-                     elif (.bad // 0) > 0 then "❌ \(.bad) 项问题"
-                     elif (.warn // 0) > 0 then "⚠️ \(.warn) 条警告"
-                     else "✅ 通过" end)
-                  ] | "| " + join(" | ") + " |"])[]
-            ' "${rows[@]}"
+              | (["| Release | 变体 | 资产 | 体积（压缩/解包） | e_flags | 解释器 | GLIBCXX | GLIBC | PE32+ / PE32 | 未 strip | CodeAnalysis | 结论 |",
+                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                + [.[] | . as $r | ($r.status // "ok") as $s
+                   | ($s == "error" or $s == "missing") as $nd
+                   | [ "`\($r.tag)`",
+                       $r.variant,
+                       (if ($r.asset // "") == "" then "<缺失>" else "`\($r.asset)`" end),
+                       (if $nd then "—" else "\($r.size_tar // "—") / \($r.size_unpacked // "—")" end),
+                       (if $nd then "—"
+                        elif ($r.elf_flags_ok == false) then "❌ \($r.elf_flags // "?")"
+                        else ($r.elf_flags // "—") end),
+                       (if $nd then "—"
+                        else ((($r.interp // "") | test("musl")) as $musl
+                              | if ($r.interp_ok == false) then "❌ \(if $musl then "musl" else "glibc" end)"
+                                else (if $musl then "musl" else "glibc" end) end)
+                        end),
+                       (if $nd then "—" elif ($r.glibcxx // "") == "" then "—（不检查）" elif ($r.glibcxx_ok == false) then "❌ \($r.glibcxx)" else $r.glibcxx end),
+                       (if $nd then "—" elif ($r.glibc // "") == "" then "—（不检查）" elif ($r.glibc_ok == false) then "❌ \($r.glibc)" else $r.glibc end),
+                       (if $nd then "—" else "\($r.pe_total // "—") / \($r.pe32 // "—")" end),
+                       (if $nd then "—"
+                        elif ($r.unstripped // 0) > 0 then "⚠️ \($r.unstripped)" else "0" end),
+                       (if $nd then "—"
+                        elif ($r.codeanalysis // "") == "" then "—（未查）"
+                        elif ($r.codeanalysis_ok == false) then "❌ \($r.codeanalysis)" else $r.codeanalysis end),
+                       (if $s == "missing" then "❌ 缺失"
+                        elif $s == "error" then "❌ 检查失败"
+                        elif ($r.bad // 0) > 0 then "❌ \($r.bad) 项问题"
+                        elif ($r.warn // 0) > 0 then "⚠️ \($r.warn) 条警告"
+                        else "✅ 通过" end)
+                     ] | "| " + join(" | ") + " |"])[]
+            ' "${files[@]}"
             echo
             echo "> ❌ = 检查出的问题（第一版不因此失败）；⚠️ = 需要人看一眼；"
             echo "> 「未 strip」列是排除 .dbg/.o 之后的计数。"
+            if [ "${#notes[@]}" -gt 0 ]; then
+              echo
+              for n in "${notes[@]}"; do echo "> ⚠️ $n"; done
+            fi
           fi
           echo
           echo "### 各资产报告"
