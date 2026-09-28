@@ -114,6 +114,18 @@ jobs:
           jq -r '.[] | "- `\(.ref)` × \(.variant) → Release `\(.release_tag)`"' matrix.json
         } >> "$GITHUB_STEP_SUMMARY"
 
+    # 给 selfcheck.yml 用：它要知道「本次构建发布了哪些 release_tag」才能去体检。
+    # 手动跑 selfcheck.yml（体检历史 Release）时不走这份工件，直接读已发布的资产。
+    - name: Upload release plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-plan
+        retention-days: 7
+        if-no-files-found: warn
+        path: |
+          matrix.json
+          releases.json
+
   build:
     needs: prepare
     if: ${{ needs.prepare.outputs.has_targets == 'true' }}
@@ -133,6 +145,8 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-cached-tools: 'true'
+
+    - uses: actions/checkout@v4   # 取 scripts/selfcheck.sh
 
     - name: Clone VMR
       id: clone
@@ -238,6 +252,47 @@ jobs:
         echo "SDK 产物:        $(compgen -G "$sdk" | tr '\n' ' ')"
         echo "SourceBuilt 产物: $(compgen -G "$psa" | tr '\n' ' ')"
 
+    # 静态自检：x64 上就能跑完（只依赖 readelf / file / du），不需要执行 dotnet。
+    # 门禁失败 = 产物有问题 —— 中断 job，后面的 Upload .NET 不执行，
+    # 于是 release job 拿不到该变体的产物，整个 Release 跳过并告警，不会发出半份/错 ABI 的版本。
+    # 需要真正执行 dotnet 的检查（--info、各发布组合）不在这里，那些得在目标发行版里跑。
+    - name: Self-check
+      env:
+        IMAGE: ghcr.io/chenguohui/dotnet-buildtools-prereqs-docker:${{ matrix.docker_tag }}
+      run: |
+        set -euo pipefail
+        d="$GITHUB_WORKSPACE/build-info"
+        mkdir -p "$d"
+        report="$d/selfcheck-${{ matrix.variant }}.md"
+
+        # 容器内外的 workspace 路径保持一致，selfcheck 的 glob 参数可以原样透传
+        status=0
+        docker run --platform linux/amd64 --rm \
+          -v "$GITHUB_WORKSPACE":"$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+          "$IMAGE" \
+          bash "$GITHUB_WORKSPACE/scripts/selfcheck.sh" \
+            --sdk  '${{ steps.assets.outputs.sdk_glob }}' \
+            --psa  '${{ steps.assets.outputs.psa_glob }}' \
+            --variant '${{ matrix.variant }}' \
+            --abi '${{ matrix.abi }}' \
+            --abiflags '${{ matrix.elf_flags }}' \
+            --version '${{ matrix.sdk_version }}' \
+            --glibc-max '${{ matrix.glibc_max }}' \
+            --out "$report" || status=$?
+
+        # 无论通过与否都把报告贴到 job 摘要里，失败时直接能看
+        { echo "### 自检 · ${{ matrix.variant }}"; echo; cat "$report" 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY" || true
+        exit $status
+
+    # 自检报告单独留一份（30 天），门禁失败时上面那个 artifact 不会上传，只有这份能看
+    - name: Upload self-check report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: selfcheck--${{ matrix.release_tag }}--${{ matrix.variant }}
+        retention-days: 30
+        path: ${{ github.workspace }}/build-info/selfcheck-${{ matrix.variant }}.md
+
     - name: Upload .NET
       uses: actions/upload-artifact@v4
       with:
@@ -249,6 +304,7 @@ jobs:
           ${{ steps.assets.outputs.sdk_glob }}
           ${{ steps.assets.outputs.psa_glob }}
           ${{ github.workspace }}/build-info/build-info-${{ matrix.variant }}.txt
+          ${{ github.workspace }}/build-info/selfcheck-${{ matrix.variant }}.md
 
   # 每个 release_tag 一个 GitHub Release；ABI1.0 / ABI2.0 天然分开在各自的 tag 下
   # 某个 target 构建失败只影响它自己的 Release（失败的会跳过并告警，不会误发半份产物）
@@ -280,6 +336,7 @@ jobs:
         cd "${{ github.workspace }}/release-assets"
 
         # build-info-*.txt 只用于完整性校验和 release notes，不作为资产上传
+        # selfcheck-*.md 同理（自检报告进 notes，不进资产）
         # 按文件名去重：gh 以文件名作为 asset 名，同名传两次会被 GitHub 拒绝（HTTP 404）
         declare -A seen=()
         assets=()
@@ -293,7 +350,7 @@ jobs:
           fi
           seen[$b]=$f
           assets+=("$f")
-        done < <(find . -type f ! -name 'build-info-*.txt' | LC_ALL=C sort)
+        done < <(find . -type f ! -name 'build-info-*.txt' ! -name 'selfcheck-*.md' | LC_ALL=C sort)
 
         if [ ${#assets[@]} -eq 0 ]; then
           echo "::warning::${{ matrix.release_tag }} 没有产物（构建失败或被跳过），不创建 Release"
@@ -329,6 +386,11 @@ jobs:
           echo '  ```'
           find . -name 'build-info-*.txt' | sort | xargs cat | sed 's/^/  /'
           echo '  ```'
+          # 自检报告本身就是 markdown，直接拼进 notes（每个变体一份）
+          if find . -name 'selfcheck-*.md' | grep -q .; then
+            echo
+            find . -name 'selfcheck-*.md' | sort | xargs cat
+          fi
         } > "$notes"
         cat "$notes"
 
