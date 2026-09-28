@@ -30,33 +30,15 @@ on:
         default: false
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 构建目标表。每条 = 一个 (ref × 构建变体)，同一个 release_tag 的多条变体
-# （如 lns23 + musl）合并发布到同一个 GitHub Release。
-#
-#   target       构建 job 标识，同时用于 artifact 名
-#   group        net9 / net10 / net11 —— workflow_dispatch 的 target 输入按此过滤
-#   enabled      false = 预留不触发（v11 ABI1.0 分支尚未就绪）
-#   major        .NET 主版本，决定构建命令（9 用 prep-source-build.sh，10/11 用 --prep）
-#   abi          abi1.0 / abi2.0；用于 release notes、tag 校验、Latest 判定
-#   ref          chenguohui/dotnet 里的分支或 tag（CI 不再打补丁）
-#   release_tag  GitHub Release tag；<版本>-abi2.0 / <版本>-abi1.0，后缀必须与 abi 一致
-#   variant      lns8(ABI1.0) / lns23(ABI2.0) / musl(ABI2.0)；os、rid、docker_tag 由它推导
-#   branding     v10: release / v11: repodefault（v9 不使用）
-#   buildid      dotnet OfficialBuildId（v9 不使用）
+# 构建目标表在 config/targets.json（build.yml / selfcheck.yml 共用）：
+#   targets[]  每条 = 一个 (ref × 构建变体)；同一个 release_tag 的多条变体
+#              （如 lns23 + musl）合并发布到同一个 GitHub Release
+#   abis[]     elf_flags —— 按 ABI 区分
+#   variants[] os / rid / docker_tag / glibc_max / glibcxx_max —— 按构建变体区分
+# release_tag 与 sdk_version 由 ref + abi 推导（可显式覆盖）。
+# 一致性校验在 prepare 中执行：variant/abi 必须在配置表里、同一 ref 只能对应唯一的
+# (group, abi)、release_tag 后缀必须与 abi 一致 —— 出错直接失败，不会发出贴错标签的 Release。
 # ─────────────────────────────────────────────────────────────────────────────
-env:
-  TARGETS: |
-    [
-      {"target":"net9-abi2.0-lns23",  "group":"net9",  "enabled":true,  "major":9,  "abi":"abi2.0", "ref":"v9.0.121-abi2.0",          "release_tag":"v9.0.121-abi2.0",                 "variant":"lns23", "branding":"",            "buildid":""},
-      {"target":"net9-abi2.0-musl",   "group":"net9",  "enabled":true,  "major":9,  "abi":"abi2.0", "ref":"v9.0.121-abi2.0",          "release_tag":"v9.0.121-abi2.0",                 "variant":"musl",  "branding":"",            "buildid":""},
-      {"target":"net9-abi1.0-lns8",   "group":"net9",  "enabled":true,  "major":9,  "abi":"abi1.0", "ref":"v9.0.121-abi1.0",          "release_tag":"v9.0.121-abi1.0",                 "variant":"lns8",  "branding":"",            "buildid":""},
-      {"target":"net10-abi2.0-lns23", "group":"net10", "enabled":true,  "major":10, "abi":"abi2.0", "ref":"v10.0.112-abi2.0",         "release_tag":"v10.0.112-abi2.0",                "variant":"lns23", "branding":"release",     "buildid":"20260822.8"},
-      {"target":"net10-abi2.0-musl",  "group":"net10", "enabled":true,  "major":10, "abi":"abi2.0", "ref":"v10.0.112-abi2.0",         "release_tag":"v10.0.112-abi2.0",                "variant":"musl",  "branding":"release",     "buildid":"20260822.8"},
-      {"target":"net10-abi1.0-lns8",  "group":"net10", "enabled":true,  "major":10, "abi":"abi1.0", "ref":"v10.0.112-abi1.0",         "release_tag":"v10.0.112-abi1.0",                "variant":"lns8",  "branding":"release",     "buildid":"20260822.8"},
-      {"target":"net11-abi2.0-lns23", "group":"net11", "enabled":true,  "major":11, "abi":"abi2.0", "ref":"v11.0.100-rc.1.26425.128-abi2.0", "release_tag":"v11.0.100-rc.1.26425.128-abi2.0", "variant":"lns23", "branding":"repodefault", "buildid":"20260825.28"},
-      {"target":"net11-abi2.0-musl",  "group":"net11", "enabled":true,  "major":11, "abi":"abi2.0", "ref":"v11.0.100-rc.1.26425.128-abi2.0", "release_tag":"v11.0.100-rc.1.26425.128-abi2.0", "variant":"musl",  "branding":"repodefault", "buildid":"20260825.28"},
-      {"target":"net11-abi1.0-lns8",  "group":"net11", "enabled":false, "major":11, "abi":"abi1.0", "ref":"v11.0.100-rc.1.26425.128-abi1.0", "release_tag":"v11.0.100-rc.1.26425.128-abi1.0", "variant":"lns8",  "branding":"repodefault", "buildid":"20260825.28"}
-    ]
 
 jobs:
   # 按 inputs.target 过滤目标表，生成 build / release 两个矩阵
@@ -67,32 +49,43 @@ jobs:
       releases: ${{ steps.gen.outputs.releases }}
       has_targets: ${{ steps.gen.outputs.has_targets }}
     steps:
+    - uses: actions/checkout@v4
+
     - id: gen
       run: |
         set -euo pipefail
 
-        # variant -> os / rid / docker_tag 统一推导，避免逐条重复和 linux-msul 这类拼写错误
-        printf '%s' "$TARGETS" | jq -c \
+        # 目标表在 config/targets.json：variant / abi 分别去 variants / abis 表里取
+        # os、rid、docker_tag、elf_flags、glibc_max 等，避免逐条重复和 linux-msul 这类拼写错误
+        jq -c \
           --arg g '${{ inputs.target }}' '
-            map(. + {
-              os:         (if .variant == "musl" then "linux-musl" else "linux" end),
-              rid:        (if .variant == "musl" then "linux-musl-loongarch64" else "linux-loongarch64" end),
-              docker_tag: ("azurelinux-3.0-net10.0-cross-loongarch64-" + .variant)
-            })
+            .variants as $V | .abis as $A
+            | .targets
+            | map(. + $V[.variant] + $A[.abi]
+                + { sdk_version: (.sdk_version // (.ref | sub("^v"; "") | sub("-abi[12]\\.0$"; ""))) })
+            | map(. + { release_tag: (.release_tag // ("v" + .sdk_version + "-" + .abi)) })
             | map(select(.enabled))
             # 一致性校验（只查启用的条目；给未就绪分支留的占位行（enabled:false）不参与）：
-            #   1) 同一个 ref 不得同时用于 ABI1.0 / ABI2.0 —— 否则同一份分支会被发成两个 ABI
-            #   2) release_tag 必须以 -<abi> 结尾 —— 否则 tag 与产物 ABI 不符
-            # 两类错误都会让 prepare 直接失败，而不是发出一个贴错标签的 Release
+            #   1) variant / abi 必须能在 variants / abis 表里查到 —— 否则 . + null 会静默通过，
+            #      产出一个没有 docker_tag / elf_flags 的目标（拼错 lns23 -> lns3 之类）
+            #   2) 同一个 ref 只能对应唯一的 (group, abi) —— 一个分支只可能是一个版本的
+            #      一个 ABI；同一 ref 横跨版本或 ABI 都是抄错了（v9 的 ref 填进 net10 条目、
+            #      或 ABI1.0 的 ref 配 ABi2.0）。同一 ref 的多个变体（lns23 + musl）是正常的
+            #   3) release_tag 必须以 -<abi> 结尾 —— 否则 tag 与产物 ABI 不符
+            # 都会让 prepare 直接失败，而不是发出一个贴错标签的 Release
+            | ([.[] | select((.docker_tag // "") == "" or (.elf_flags // "") == "" or (.rid // "") == "") | .target]) as $bad_join
+            | (group_by(.ref) | [.[] | select((map(.group + "/" + .abi) | unique | length) > 1)
+                | (.[0].ref + " → " + (map(.group + "/" + .abi) | unique | join(", ")))]) as $bad_ref
             | ([.[] | . as $t | select($t.release_tag | endswith("-" + $t.abi) | not) | $t.target]) as $bad_tag
-            | (group_by(.ref) | [.[] | select((map(.abi) | unique | length) > 1) | .[0].ref]) as $bad_ref
-            | if ($bad_ref | length) > 0 then
-                error("同一 ref 被用于多个 ABI: " + ($bad_ref | join(", ")))
+            | if ($bad_join | length) > 0 then
+                error("variant / abi 不在配置表中: " + ($bad_join | join(", ")))
+              elif ($bad_ref | length) > 0 then
+                error("同一 ref 对应多个 (group, abi): " + ($bad_ref | join("; ")))
               elif ($bad_tag | length) > 0 then
                 error("release_tag 后缀与 abi 不一致: " + ($bad_tag | join(", ")))
               else . end
             | map(select($g == "all" or .group == $g))
-          ' > matrix.json
+          ' config/targets.json > matrix.json
 
         # 每个 release_tag 一个 Release；expect 为该 Release 应有的变体，用于校验产物完整性
         # latest：仅当本次运行为「唯一一个非 rc 的默认（ABI2.0）Release」时才打 Latest 标记，
