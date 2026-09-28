@@ -1,0 +1,369 @@
+name: SDK self-check (published releases)
+
+# 体检「已经发出去的」SDK 资产，对应 build.yml 里构建时的 scripts/selfcheck.sh。
+# 构建时的门禁只能证明当下那次构建没问题；发布之后资产躺在 Release 里，
+# 没有任何东西再核对过它 —— 这个工作流就是补这一环：拿 Release 里的 tar.gz 解包，
+# 量 GLIBCXX / GLIBC 上限、ELF flags、解释器与 RID 是否相符、analyzers 引用了哪个
+# Microsoft.CodeAnalysis、PE32+/未 strip 的数量与体积，汇成一张表。
+#
+# 第一版**只报告**：检查不过只会显示 ❌ / ⚠️ 并打注解，不让 job 变红 ——
+# 先看清现状再决定哪些该当门禁（脚本已留好 --strict，届时在 check 步骤加上即可）。
+# 唯一会让 job 变红的是「检查没能完成」（脚本退出码 2：资产下不下来、解包失败等），
+# 那属于流水线故障，不该被静默吞掉。
+#
+# 触发方式：
+#   - build.yml 跑完自动（读它留下的 release-plan 工件，与 test.yml 同一套路）
+#   - 手动 workflow_dispatch：可以指定任意历史 Release 的 tag，留空则取最近 5 个
+#
+# 注意：workflow_dispatch / workflow_run 都要求本文件已经在默认分支上才会被触发
+# （在 feature 分支上 `gh workflow run` 与 dispatch API 都是 404）—— 端到端验证必须
+# 等它合进 main。
+
+on:
+  workflow_run:
+    workflows: ["Release LoongArch .NET SDK"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release_tags:
+        description: '要体检的 Release tag（空格或逗号分隔）；留空 = 最近 5 个'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: sdk-selfcheck-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # 列出「哪些 Release 的哪些 SDK 资产要体检」，顺带把 config/targets.json 里的期望值
+  # （elf_flags / glibcxx_max / glibc_max）查出来放进矩阵 —— check job 只认矩阵，不再读配置
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_assets: ${{ steps.plan.outputs.has_assets }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+
+    - name: 规划检查矩阵
+      id: plan
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.event.workflow_run.id }}
+        TAGS_INPUT: ${{ inputs.release_tags }}
+      run: |
+        set -uo pipefail
+
+        # 读不到配置表就到此为止：否则 RIDS 为空 → 每个资产都「后缀不认识」地跳过 →
+        # 报告显示「没有可体检的资产」但 job 是绿的，等于静默失效
+        RIDS=$(jq -r '.variants[].rid' config/targets.json | sort -u | tr '\n' ' ') || true
+        if [ -z "${RIDS// /}" ]; then
+          echo "::error::读不到 config/targets.json 的 variants[].rid —— 检查计划无法生成"
+          exit 1
+        fi
+
+        # ── 1. 本次要体检哪些 Release ────────────────────────────────────────
+        # workflow_run：唯一来源是 build.yml 的 prepare 留下的 release-plan
+        #   （本次意图发布的 tag）。读不到就是「这次构建没走到发布」—— 什么都不做，
+        #   **不要**回退去查历史 Release，那会把早就体检过的版本重查一遍。
+        #   实际发没发以 gh release 为准，下一步逐个核对。
+        # 手动：输入里给；留空则取最近 5 个。
+        tags=()
+        declare -A EXPECT=()   # tag → 该 Release 应有的变体（逗号分隔，排好序）；只有读工件时才有
+        if [ -n "${RUN_ID:-}" ]; then
+          rm -rf plan
+          if gh run download "$RUN_ID" -R "$REPO" -n release-plan -D plan 2>/dev/null \
+             && [ -f plan/releases.json ]; then
+            mapfile -t tags < <(jq -r '.include[].release_tag' plan/releases.json)
+            while IFS=$'\t' read -r t e; do EXPECT[$t]=$e; done \
+              < <(jq -r '.include[] | [.release_tag, (.expect | join(","))] | @tsv' plan/releases.json)
+          else
+            echo "::warning::本次构建没有 release-plan 工件，跳过（构建在 prepare 之前就失败？）"
+          fi
+        elif [ -n "${TAGS_INPUT//[[:space:]]/}" ]; then
+          read -r -a tags <<< "${TAGS_INPUT//,/ }"
+        else
+          mapfile -t tags < <(gh release list -R "$REPO" -L 5 --json tagName -q '.[].tagName')
+        fi
+        echo "待体检 Release：${tags[*]:-<无>}"
+
+        # ── 2. 每个 tag 下的 SDK 资产 → 一行矩阵 ─────────────────────────────
+        rows='[]'
+        for tag in "${tags[@]}"; do
+          case "$tag" in
+            *-abi1.0) abi=abi1.0 ;;
+            *-abi2.0) abi=abi2.0 ;;
+            *) echo "::warning::$tag 不以 -abi1.0 / -abi2.0 结尾，跳过"; continue ;;
+          esac
+          ver_tag=${tag%-"$abi"}; ver_tag=${ver_tag#v}
+
+          if ! assets=$(gh release view "$tag" -R "$REPO" --json assets -q '.assets[].name' 2>/dev/null); then
+            echo "::warning::$tag 读不到（不存在？），跳过"
+            continue
+          fi
+          sdks=$(printf '%s\n' "$assets" | grep -E '^dotnet-sdk-.*\.tar\.gz$' || true)
+          if [ -z "$sdks" ]; then
+            echo "::warning::$tag 里没有 dotnet-sdk-*.tar.gz，跳过"
+            continue
+          fi
+
+          tag_variants=()
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            stem=${asset#dotnet-sdk-}; stem=${stem%.tar.gz}
+
+            # RID 按配置表里的 rid 列表认后缀（比按 `-` 猜版本号可靠：
+            # 版本里有 rc.1.26425.128 这种带点的段）
+            rid=""; ver=""
+            for r in $RIDS; do
+              case "$stem" in *-"$r") rid=$r; ver=${stem%-"$r"} ;; esac
+            done
+            if [ -z "$rid" ]; then
+              echo "::warning::$tag/$asset 的后缀不在已知 RID（$RIDS）里，跳过"
+              continue
+            fi
+
+            # (abi, rid) → 变体。只按 rid 反查是不够的：lns8 与 lns23 共用
+            # linux-loongarch64，光看 rid 会同时命中两个变体（实测）。
+            # 取 targets[] 里出现过的 (abi, variant) 组合再按 rid 过滤；不滤 enabled ——
+            # 反查要问的是「这个组合成立吗」，而不是「这次构建它了吗」。
+            varmap=$(jq -r --arg a "$abi" --arg r "$rid" '
+              . as $c
+              | [.targets[] | select(.abi == $a) | .variant] | unique
+              | map(select($c.variants[.].rid == $r)) | .[]
+            ' config/targets.json)
+            case "$(printf '%s\n' "$varmap" | grep -c . || true)" in
+              1) variant=$varmap ;;
+              0) echo "::warning::$tag/$asset 的 (abi=$abi, rid=$rid) 在 config/targets.json 里没有对应变体，跳过"
+                 continue ;;
+              *) echo "::warning::$tag/$asset 的 (abi=$abi, rid=$rid) 对应多个变体（$(printf '%s\n' "$varmap" | tr '\n' ' ')），跳过"
+                 continue ;;
+            esac
+
+            # 资产名里的版本与 tag 里的版本不一致 —— 多半是这次发布贴错了资产，仍然体检并记下来
+            [ "$ver" = "$ver_tag" ] \
+              || echo "::warning::$tag 里 $asset 的版本是 $ver，与 tag 的 $ver_tag 不符"
+
+            row=$(jq -nc \
+              --arg t "$tag" --arg a "$asset" --arg v "$variant" --arg abi "$abi" \
+              --arg rid "$rid" --arg ver "$ver" \
+              --arg fl "$(jq -r --arg a "$abi"   '.abis[$a].elf_flags // ""'       config/targets.json)" \
+              --arg gx "$(jq -r --arg v "$variant" '.variants[$v].glibcxx_max // ""' config/targets.json)" \
+              --arg gl "$(jq -r --arg v "$variant" '.variants[$v].glibc_max // ""'   config/targets.json)" \
+              '{tag:$t, asset:$a, variant:$v, abi:$abi, rid:$rid, version:$ver,
+                elf_flags:$fl, glibcxx_max:$gx, glibc_max:$gl}')
+            rows=$(jq -c --argjson r "$row" '. + [$r]' <<<"$rows")
+            tag_variants+=("$variant")
+          done <<< "$sdks"
+
+          # 该发的变体都发出来了吗 —— 「发了一半」在 Release 页面上看不出来，
+          # 只有拿配置表的 expect 与实际资产对一遍才知道。这里只能按**资产文件名**
+          # 归类（包内是什么得等 check job 解包才知道，例如 v9.0.121-abi2.0 那份
+          # 名叫 linux-loongarch64 的资产实际是 musl 构建）—— 所以措辞只说文件名。
+          # 只有 workflow_run 路径有 expect：手动体检历史 Release 时不判，
+          # 那时的 expect 未必是当初发布时的配置。
+          exp=${EXPECT[$tag]:-}
+          if [ -n "$exp" ]; then
+            got=$(printf '%s\n' "${tag_variants[@]}" | grep . | LC_ALL=C sort -u | paste -sd, -)
+            [ "$got" = "$exp" ] \
+              || echo "::warning::$tag 里 SDK 资产的文件名只对应变体 ${got:-<无>}，配置表期望 $exp"
+          fi
+        done
+
+        n=$(jq 'length' <<<"$rows")
+        echo "has_assets=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        # $GITHUB_OUTPUT 的值必须是单行 —— jq -c 保证
+        printf 'matrix=%s\n' "$(jq -c '{include: .}' <<<"$rows")" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### 体检计划（$n 个资产）"
+          echo
+          if [ "$n" -gt 0 ]; then
+            echo "| Release | 变体 | 资产 | 期望 e_flags | 期望 GLIBCXX | 期望 GLIBC |"
+            echo "| --- | --- | --- | --- | --- | --- |"
+            jq -r '.[] | "| `\(.tag)` | \(.variant) | `\(.asset)` | `\(.elf_flags)` | \(if .glibcxx_max == "" then "不检查" else .glibcxx_max end) | \(if .glibc_max == "" then "不检查" else .glibc_max end) |"' <<<"$rows"
+          else
+            echo "没有可体检的资产。"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+  # 每个 (Release × 资产) 一个 job：下载资产 → 跑 scripts/selfcheck-release.sh
+  check:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_assets == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+
+    # ildasm 从 NuGet 取小体积的原生包即可，runner 上不需要 dotnet。
+    # 版本固定：ILDAsm 只读 ECMA-335 元数据，10.0.12 读 .NET 11 的 analyzer
+    # 与 11.0 版的 ildasm 结果一致（实测）。
+    - name: 取 ildasm
+      env:
+        ILDASM_VER: '10.0.12'
+      run: |
+        set -euo pipefail
+        curl -sSL --retry 3 -o ildasm.nupkg \
+          "https://www.nuget.org/api/v2/package/runtime.linux-x64.Microsoft.NETCore.ILDAsm/${ILDASM_VER}"
+        unzip -q -o ildasm.nupkg 'runtimes/linux-x64/native/ildasm' -d ild
+        chmod +x ild/runtimes/linux-x64/native/ildasm
+        ild/runtimes/linux-x64/native/ildasm -? >/dev/null 2>&1 || true
+
+    - name: 下载资产
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        mkdir -p dl
+        gh release download '${{ matrix.tag }}' -R "$GITHUB_REPOSITORY" \
+          --pattern '${{ matrix.asset }}' --dir dl
+
+        # 下载完整性：gh 会中途断流（实测一次 167MiB 的资产只下到 160MiB，
+        # 报 stream error / PROTOCOL_ERROR），而截断的 tar.gz 要到解包中途才炸，
+        # 那时错误信息只剩一句「解包失败」。直接和 Release 里登记的字节数比一次。
+        want=$(gh release view '${{ matrix.tag }}' -R "$GITHUB_REPOSITORY" \
+                 --json assets -q '.assets[] | select(.name == "${{ matrix.asset }}") | .size')
+        got=$(stat -c%s "dl/${{ matrix.asset }}")
+        if [ "$want" != "$got" ]; then
+          echo "::error::${{ matrix.asset }} 下载不完整：Release 登记 $want 字节，实际 $got 字节"
+          exit 1
+        fi
+        ls -la dl
+
+    - name: 体检
+      id: check
+      run: |
+        set -uo pipefail
+        bash scripts/selfcheck-release.sh \
+          --sdk "dl/${{ matrix.asset }}" \
+          --variant '${{ matrix.variant }}' \
+          --abi '${{ matrix.abi }}' \
+          --rid '${{ matrix.rid }}' \
+          --elf-flags '${{ matrix.elf_flags }}' \
+          --glibcxx-max '${{ matrix.glibcxx_max }}' \
+          --glibc-max '${{ matrix.glibc_max }}' \
+          --ildasm "$PWD/ild/runtimes/linux-x64/native/ildasm" \
+          --tag '${{ matrix.tag }}' \
+          --out "report-${{ matrix.variant }}.md" \
+          --json "row-${{ matrix.variant }}.json"
+        rc=$?
+        { echo "### ${{ matrix.tag }} · ${{ matrix.variant }}"; echo; cat "report-${{ matrix.variant }}.md" 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY"
+        # 0 = 检查跑完（有 ❌ 也是 0，第一版只报告）；2 = 检查没能完成，job 变红
+        exit $rc
+
+    # 脚本没跑成（超时、被杀）时补一行 status=error，总表里不会缺这一行
+    - name: 补齐失败行
+      if: always()
+      run: |
+        set -uo pipefail
+        f="row-${{ matrix.variant }}.json"
+        [ -f "$f" ] || printf '{"tag":"%s","variant":"%s","asset":"%s","status":"error","bad":0,"warn":0}\n' \
+          '${{ matrix.tag }}' '${{ matrix.variant }}' '${{ matrix.asset }}' > "$f"
+
+    - name: 上传报告
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-selfcheck--${{ matrix.tag }}--${{ matrix.variant }}
+        retention-days: 30
+        if-no-files-found: warn
+        path: |
+          report-${{ matrix.variant }}.md
+          row-${{ matrix.variant }}.json
+
+  # 汇总：所有资产一张表（就是「可阅读的版本」），每份报告收在 <details> 里
+  report:
+    needs: check
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/download-artifact@v4
+      continue-on-error: true   # 全部 check 都没跑成时这里会空，交给下一步判断
+      with:
+        pattern: sdk-selfcheck--*
+        path: results
+
+    - name: 汇总
+      run: |
+        set -uo pipefail
+        shopt -s nullglob
+
+        mapfile -t rows < <(find results -name 'row-*.json' 2>/dev/null | LC_ALL=C sort)
+        echo "收到 ${#rows[@]} 份结果"
+
+        out="sdk-selfcheck-report.md"
+        {
+          echo "## SDK 自检总表"
+          echo
+          if [ "${#rows[@]}" -eq 0 ]; then
+            echo "没有收到任何结果 —— 检查 job 全部没跑成。"
+          else
+            jq -s -r '
+              sort_by(.tag, .variant)
+              | (["| Release | 变体 | 体积（压缩/解包） | e_flags | 解释器 | GLIBCXX | GLIBC | PE32+ / PE32 | 未 strip | CodeAnalysis | 结论 |",
+                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                + [.[] | [
+                    "`\(.tag)`",
+                    .variant,
+                    "\(.size_tar // "—") / \(.size_unpacked // "—")",
+                    (if .status == "error" then "—" elif (.elf_flags_ok == false) then "❌ \(.elf_flags // "?")" else (.elf_flags // "—") end),
+                    (if .status == "error" then "—"
+                     else (if (.interp // "") | test("musl") then "musl" else "glibc" end) as $fam
+                          | if (.interp_ok == false) then "❌ \($fam)" else $fam end
+                     end),
+                    (if .status == "error" then "—" elif (.glibcxx // "") == "" then "—（不检查）" elif (.glibcxx_ok == false) then "❌ \(.glibcxx)" else .glibcxx end),
+                    (if .status == "error" then "—" elif (.glibc // "") == "" then "—（不检查）" elif (.glibc_ok == false) then "❌ \(.glibc)" else .glibc end),
+                    (if .status == "error" then "—" else "\(.pe_total // "—") / \(.pe32 // "—")" end),
+                    (if .status == "error" then "—"
+                     elif (.unstripped // 0) > 0 then "⚠️ \(.unstripped)" else "0" end),
+                    (if .status == "error" then "—"
+                     elif (.codeanalysis // "") == "" then "—（未查）"
+                     elif (.codeanalysis_ok == false) then "❌ \(.codeanalysis)" else .codeanalysis end),
+                    (if .status == "error" then "❌ 检查失败"
+                     elif (.bad // 0) > 0 then "❌ \(.bad) 项问题"
+                     elif (.warn // 0) > 0 then "⚠️ \(.warn) 条警告"
+                     else "✅ 通过" end)
+                  ] | "| " + join(" | ") + " |"])[]
+            ' "${rows[@]}"
+            echo
+            echo "> ❌ = 检查出的问题（第一版不因此失败）；⚠️ = 需要人看一眼；"
+            echo "> 「未 strip」列是排除 .dbg/.o 之后的计数。"
+          fi
+          echo
+          echo "### 各资产报告"
+          echo
+          for r in $(find results -name 'report-*.md' 2>/dev/null | LC_ALL=C sort); do
+            echo "<details><summary>${r#results/}</summary>"
+            echo
+            cat "$r"
+            echo
+            echo "</details>"
+          done
+        } > "$out"
+
+        cat "$out" >> "$GITHUB_STEP_SUMMARY"
+        head -n 20 "$out"   # 日志里给个总表；完整报告（含各资产明细）看 job summary 或工件
+
+    - name: 上传总表
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-selfcheck-report
+        retention-days: 30
+        if-no-files-found: warn
+        path: sdk-selfcheck-report.md
