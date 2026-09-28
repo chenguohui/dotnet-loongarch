@@ -193,8 +193,18 @@ jobs:
 
         case '${{ matrix.major }}' in
           9)
-            # .NET 9 的 VMR 用 prep-source-build.sh 准备源，RID 由 CrossBuild/PortableBuild 推导
-            CMD="./prep-source-build.sh && ./build.sh -c Release -sb --os ${{ matrix.os }} --arch loongarch64 --clean-while-building -- /p:CrossBuild=true /p:PortableBuild=true"
+            # .NET 9 的 VMR 用 prep-source-build.sh 准备源；9.0 的 build.sh 没有 --prep/--rid，
+            # 目标 RID 只能显式给成 MSBuild 属性：
+            #   glibc 变体（lns8 / lns23）：CrossBuild + PortableBuild 就够
+            #   musl 变体（alpine）：还必须给 HostRid / PortableRid / TargetArchitecture，
+            #     否则构建出的是 glibc 产物，文件名也变成 linux-loongarch64 —— 与 lns23 的
+            #     同名产物在 release job 合并时互相覆盖，最后发出哪一份取决于顺序
+            #     （v9.0.121-abi2.0 里那份名叫 linux-loongarch64、实际是 musl 的资产即由此而来）
+            props="/p:CrossBuild=true /p:PortableBuild=true"
+            if [ '${{ matrix.os }}' = 'linux-musl' ]; then
+              props="$props /p:HostRid=${{ matrix.rid }} /p:PortableRid=${{ matrix.rid }} /p:TargetArchitecture=loongarch64"
+            fi
+            CMD="./prep-source-build.sh && ./build.sh -c Release -sb --os ${{ matrix.os }} --arch loongarch64 --clean-while-building -- $props"
             ;;
           10|11)
             CMD="./build.sh --clean-while-building --prep -sb --os ${{ matrix.os }} --rid ${{ matrix.rid }} --arch loongarch64 --branding ${{ matrix.branding }} -p:OfficialBuildId=${{ matrix.buildid }}"
@@ -251,6 +261,17 @@ jobs:
         echo "psa_glob=$psa" >> "$GITHUB_OUTPUT"
         echo "SDK 产物:        $(compgen -G "$sdk" | tr '\n' ' ')"
         echo "SourceBuilt 产物: $(compgen -G "$psa" | tr '\n' ' ')"
+
+        # 产物名必须与本变体的 RID 相符。构建命令少给 RID 属性时（例如 .NET 9 的 musl
+        # 变体少了 HostRid/PortableRid），产出的是另一个 RID 的包、名字也跟着错，
+        # 而 release job 的完整性校验查的是 build-info-<变体>.txt —— 那个文件只要 job
+        # 跑过就有，查不出这种错。等到合并时才发现，就只剩两个同名产物互相覆盖了。
+        want="dotnet-sdk-${{ matrix.sdk_version }}-${{ matrix.rid }}.tar.gz"
+        got=$(basename "$(compgen -G "$sdk" | head -n1)")
+        if [ "$got" != "$want" ]; then
+          echo "::error::本变体（${{ matrix.variant }}，rid=${{ matrix.rid }}）应产出 $want，实际是 ${got:-<没有 SDK 产物>} —— 构建命令给的目标 RID 不对？"
+          exit 1
+        fi
 
     # 静态自检：x64 上就能跑完（只依赖 readelf / file / du），不需要执行 dotnet。
     # 门禁失败 = 产物有问题 —— 中断 job，后面的 Upload .NET 不执行，
