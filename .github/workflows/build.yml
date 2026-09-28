@@ -301,6 +301,12 @@ jobs:
             --glibc-max '${{ matrix.glibc_max }}' \
             --out "$report" || status=$?
 
+        # 报告是容器里（root）写的，而且 selfcheck.sh 的报告来自 mktemp（0600），
+        # cp 又把那个模式带到了宿主上 —— runner 用户读不了：上面那步的 cat 被
+        # || true 吞掉（摘要里其实是空的），upload-artifact 更是直接 EACCES 把
+        # job 判红，于是「Upload .NET」被跳过、release job 跳过发布，白跑一轮。
+        sudo chown "$(id -u):$(id -g)" "$report" 2>/dev/null || true
+
         # 无论通过与否都把报告贴到 job 摘要里，失败时直接能看
         { echo "### 自检 · ${{ matrix.variant }}"; echo; cat "$report" 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY" || true
         exit $status
