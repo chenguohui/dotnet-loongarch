@@ -15,6 +15,13 @@
 #   没打开这个开关时，已存在的版本一律跳过 —— 自动化那条链（自检全绿→上传）不传
 #   --overwrite，避免把 feed 上已有的版本换掉。
 #
+# 往哪推：--source 给的是 v3 服务索引（人读的），实际推送用索引里公布的 PackagePublish
+#   端点**换成 https** 的那一个（见下面 push_source 的注释：公布的是 http://，新版
+#   NuGet 会拒推还退出 0）。推完不信客户端的话，自己去 feed 上核一遍
+#   （新推的查版本索引，覆盖的查注册索引里的 published 有没有变新）。
+#   注意 CI 里 dotnet 用哪个 SDK 由镜像里最新那个决定，setup-dotnet 装的 8.0.x 不一定是
+#   实际跑的那个 —— 头部会把客户端版本和推送目标一起打出来。
+#
 # 白名单语义（与 config/nupkg.include.txt 顶部注释一致）：
 #   #  注释（支持行尾注释）；空行忽略
 #   !  排除规则，优先级高于包含规则
@@ -110,7 +117,8 @@ pkg_meta() {
 # 2026-09-29 的 run 36563546210 就报了「成功 9，已存在 0」，而 9 个包在 feed 上
 # 本来就都有（BaGet 对已存在的 id+版本回 409），feed 上什么都没变。
 # 所以先自己问 feed：版本索引是权威的，顺带省掉白传的几十 MB。
-feed_base=""; publish_base=""
+feed_base=""; publish_base=""; reg_base=""
+push_source=$SOURCE          # 索引读不到就用 --source 本身（下面能读到时会换成 https）
 if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # 服务索引里公布的是 http://（实测），nginx 再 301 到 https；GET 跟跳转即可
   svc=$(curl -fsSL --max-time 30 "$SOURCE" 2>/dev/null)
@@ -124,6 +132,25 @@ if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     | jq -r '.resources[]? | select(."@type" | test("^PackagePublish/")) | ."@id"' 2>/dev/null \
     | head -1)
   publish_base=${publish_base%/}
+  # 真正往哪推：服务索引公布的发布端点 **换成 https** 后直接推过去，不走它公布的
+  # http:// 那一条。原因（2026-09-29 实测，run 36566565170 那 9 个假成功的根因）：
+  # 两个 feed 的索引都把 PackagePublish 公布成 http://，而 runner 上 `dotnet` 取的是
+  # 镜像里最新的 SDK（10.0.x，setup-dotnet 装的 8.0.x 只是「也在」），新版 NuGet 有
+  # HTTPS-everywhere：看到 http 发布端点**拒绝推送**，打一行 error 说"NuGet 需要
+  # HTTPS 源"（还提到 allowInsecureConnections），然后**退出码 0**——退出码、日志里
+  # 的关键字都看不出异常，9 个包就这么被记成了「覆盖成功」，feed 上一个字没动。
+  # 换成 https 直连后，新旧客户端都真推：PUT https://<host>/api/v2/package/，没有了
+  # 301 那一跳（老客户端本来能跟着 301 走，但 curl、新客户端在那一跳上的行为并不一致）。
+  # 索引读不到（不是 v3、网络问题）时退回按 --source 推，与以前一样。
+  case "$publish_base" in
+    http://*)  push_source="https://${publish_base#http://}" ;;
+    https://*) push_source=$publish_base ;;
+  esac
+  # 注册索引（published 在里面）—— 推送后校验覆盖有没有真的生效要用
+  reg_base=$(printf '%s' "$svc" \
+    | jq -r '.resources[]? | select(."@type" | test("^RegistrationsBaseUrl")) | ."@id"' 2>/dev/null \
+    | head -1)
+  reg_base=${reg_base%/}
 fi
 if [ -z "$feed_base" ]; then
   echo "::warning::nupkg-push: 读不到 $SOURCE 的 PackageBaseAddress（v3 服务索引？）——" \
@@ -143,15 +170,75 @@ feed_has() {
   printf '%s' "$idx" | jq -e --arg v "$2" '.versions | index($v)' >/dev/null 2>&1
 }
 
+# 某个 id+版本在**注册索引**里的 published 时间戳（读不到就输出空）。
+# 用来校验「覆盖」到底生效没有：BaGet 覆盖一版会重写这一行，published 会变新
+# （2026-09-29 在 lnuget 上实测：手工推的那两版时间变了）。为什么要校验 ——
+# run 36566565170 里 dotnet 对 9 个包全报了成功（退出码 0、日志里也没有
+# already exists/409），而 feed 上 9 个包的日期一个没动，等于什么都没干。
+published_of() {
+  [ -n "$reg_base" ] || return 0
+  local idl idx
+  idl=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  idx=$(curl -fsSL --max-time 30 "$reg_base/$idl/index.json" 2>/dev/null) || return 0
+  printf '%s' "$idx" \
+    | jq -r --arg v "$2" '[.items[].items[] | select(.catalogEntry.version == $v) | .catalogEntry.published] | first // empty' 2>/dev/null
+}
+
+# 推完之后再问一次 feed —— dotnet 的退出码不算数（上面那次的 9 个包就全被骗了）。
+# 覆盖：注册索引里的 published 得变新；新推：版本索引里得能查到这一版。
+# 索引可能有缓存，所以给几次重试；拿不到基准（published_of 空）时放行，不当失败。
+verify_pushed() {
+  local id=$1 ver=$2 overwrite=$3 before=$4 now i
+  for i in 1 2 3 4 5; do
+    if [ "$overwrite" = true ]; then
+      [ -n "$before" ] || return 0
+      now=$(published_of "$id" "$ver")
+      [ -n "$now" ] && [ "$now" != "$before" ] && return 0
+    else
+      feed_has "$id" "$ver" && return 0
+    fi
+    sleep 4
+  done
+  return 1
+}
+
+# feed 上这一版的 sha256 与本地文件是否一致：same / different / unknown。
+# 只在「说成功但 published 没变」时用来补一句：内容到底对不对。
+bytes_state() {
+  [ -n "$feed_base" ] || { echo unknown; return; }
+  local idl sth lth
+  idl=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+  sth=$(curl -fsSL --max-time 600 "$feed_base/$idl/$3/$idl.$3.nupkg" 2>/dev/null \
+        | sha256sum | cut -d' ' -f1) || { echo unknown; return; }
+  lth=$(sha256sum "$1" | cut -d' ' -f1)
+  if [ -z "$sth" ]; then echo unknown
+  elif [ "$sth" = "$lth" ]; then echo same
+  else echo different
+  fi
+}
+
+# 日志里已知的「假成功」签名，认出来就直接点名（退出码会骗人，关键字才是最可靠的线索）。
+explain_log() {
+  if grep -qiE 'allowInsecureConnections|HTTPS source|需要 HTTPS|https-everywhere' "$log"; then
+    echo "      ↑ 客户端拒绝往 http:// 的发布端点推（新版 NuGet 的 HTTPS-everywhere：要么用 https，要么" >&2
+    echo "        在 NuGet.Config 里显式 allowInsecureConnections=true）—— 而且它**退出码是 0**，" >&2
+    echo "        所以「dotnet 报了成功」就是它。本次推送目标：$push_source" >&2
+    return 0
+  fi
+  return 1
+}
+
 # 删掉 feed 上的一版（--overwrite 用）。0 = 删掉了；1 = 服务端拒绝；2 = 没有端点/删不了
 # 用 X-NuGet-ApiKey 头（NuGet 的删除协议），key 与推送用的是同一个。
 delete_version() {
   [ -n "$publish_base" ] || return 2
-  local idl code body
+  local idl code body del_base
+  # 和推送一样换成 https 直连，省掉 http->https 那一跳
+  del_base=${publish_base/http:/https:}
   idl=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   body=$(mktemp)
   code=$(curl -sSL -o "$body" -w '%{http_code}' -X DELETE --max-time 60 \
-           -H "X-NuGet-ApiKey: $API_KEY" "$publish_base/$idl/$2" 2>/dev/null) || code=000
+           -H "X-NuGet-ApiKey: $API_KEY" "$del_base/$idl/$2" 2>/dev/null) || code=000
   case "$code" in
     200|202|204) rm -f "$body"; return 0 ;;
     *)  local msg; msg=$(head -c 200 "$body" | "${REDACT[@]}" | tr '\n' ' ')
@@ -177,18 +264,26 @@ done
 echo "包目录:   $PACKAGES"
 echo "白名单:   $INCLUDE（包含 ${#incl[@]} 条 / 排除 ${#excl[@]} 条）"
 echo "feed:     $SOURCE"
+echo "发布端点: ${publish_base:-<没读到>}    # 服务索引公布的那个；注意可能是 http://"
+echo "推送目标: $push_source    # 实际用的（发布端点换 https；读不到索引时才是 --source）"
+echo "客户端:   $(dotnet --version 2>/dev/null || echo '<PATH 里没有 dotnet>')    # 多 SDK 时 dotnet 取最新的那个"
 echo "模式:     $([ "$DRY_RUN" = true ] && echo 'dry-run（只列不推）' || echo '真推')" \
      "$([ "$OVERWRITE" = true ] && echo '/ 覆盖已存在的版本' || echo '/ 已存在的版本跳过')"
 echo "匹配结果: 共 ${#all[@]} 个 nupkg —— 选中 ${#selected[@]}，显式排除 ${#excluded[@]}，未命中规则 ${#unmatched[@]}"
 echo
 
+# 只打印前 40 行：用数组切片，不用 `| head -40` —— 后者在 printf 还没写完时就把
+# 管道关掉，会打一行「printf: write error: Broken pipe」的假报错（PSA 解出来几百个
+# 包，未命中的那几百行必然触发）。
 if [ "${#excluded[@]}" -gt 0 ]; then
   echo "被 ! 规则排除（${#excluded[@]}）:"
-  printf '  - %s\n' "${excluded[@]}" | head -40
+  printf '  - %s\n' "${excluded[@]:0:40}"
+  [ "${#excluded[@]}" -gt 40 ] && echo "  …（还有 $(( ${#excluded[@]} - 40 )) 个）"
 fi
 if [ "${#unmatched[@]}" -gt 0 ]; then
   echo "未命中任何包含规则（${#unmatched[@]}，不上传）:"
-  printf '  - %s\n' "${unmatched[@]}" | head -40
+  printf '  - %s\n' "${unmatched[@]:0:40}"
+  [ "${#unmatched[@]}" -gt 40 ] && echo "  …（还有 $(( ${#unmatched[@]} - 40 )) 个）"
 fi
 echo
 if [ "${#selected[@]}" -eq 0 ]; then
@@ -217,6 +312,9 @@ for f in "${selected[@]}"; do
   # dry-run 也查，好让 dry-run 预告真实结果。
   exists=false
   feed_has "$id" "$ver" && exists=true
+  # 覆盖前先记下 feed 上这一版的发布时间，推完对比 —— 客户端说成功不作数
+  before=""
+  [ "$exists" = true ] && before=$(published_of "$id" "$ver")
 
   if [ "$exists" = true ] && [ "$OVERWRITE" != true ]; then
     dup=$((dup+1))
@@ -237,16 +335,18 @@ for f in "${selected[@]}"; do
   # 就一步到位，feed 上不会出现「旧版删了、新版还没推上」的空窗；服务端回 409
   # 才删掉旧版、重推第二次。两条路都失败就按**失败**报出来，不再用
   # --skip-duplicate 把 409 吞成成功。
-  push_args=( "$f" --source "$SOURCE" --api-key "$API_KEY" --timeout "$PUSH_TIMEOUT" )
+  push_args=( "$f" --source "$push_source" --api-key "$API_KEY" --timeout "$PUSH_TIMEOUT" )
   [ "$exists" = true ] || push_args+=( --skip-duplicate )
 
   verdict=""
-  if dotnet nuget push "${push_args[@]}" > "$log" 2>&1; then
+  # 客户端输出直接进日志（tee 同时留一份给下面判定，密钥先抹掉）——退出码会骗人，
+  # 它到底干了什么只有看它说了什么才知道（见 published_of 的注释）
+  if dotnet nuget push "${push_args[@]}" 2>&1 | "${REDACT[@]}" | tee "$log"; then
     :                                     # 退出码 0 也可能是「已存在被跳过」，最后统一看日志
   elif [ "$exists" = true ] && grep -qiE '409|conflict|already exists|duplicate' "$log"; then
     if delete_version "$id" "$ver"; then
       echo "  - 服务端拒绝直接覆盖，已删掉旧版本 $id $ver，重推一次"
-      dotnet nuget push "${push_args[@]}" > "$log" 2>&1 || verdict=lost
+      dotnet nuget push "${push_args[@]}" 2>&1 | "${REDACT[@]}" | tee "$log" || verdict=lost
     else
       verdict=refused
     fi
@@ -258,7 +358,6 @@ for f in "${selected[@]}"; do
     refused)
       failed=$((failed+1))
       echo "::error::nupkg-push: 覆盖失败 $b" >&2
-      tail -6 "$log" | "${REDACT[@]}" | sed 's/^/      /' >&2
       echo "      ↑ 删不掉旧版本，服务端也拒绝覆盖（BaGet 要开 AllowPackageOverwrites，或删除行为是硬删）。" >&2
       echo "        要么让服务端允许覆盖/给 key 删除权限，要么改用新版本号" >&2
       manifest_rows+=("$id|$ver|$b|$size|FAILED(已存在,覆盖被拒)")
@@ -266,7 +365,6 @@ for f in "${selected[@]}"; do
     lost)
       failed=$((failed+1))
       echo "::error::nupkg-push: 覆盖失败 $b" >&2
-      tail -6 "$log" | "${REDACT[@]}" | sed 's/^/      /' >&2
       echo "      ↑ 旧版本已经删掉了，这一版却没推上去 —— 赶紧补推" >&2
       manifest_rows+=("$id|$ver|$b|$size|FAILED(旧版已删,未推上)")
       continue ;;
@@ -279,19 +377,21 @@ for f in "${selected[@]}"; do
       else
         failed=$((failed+1))
         echo "::error::nupkg-push: 推送失败 $b" >&2
-        tail -6 "$log" | "${REDACT[@]}" | sed 's/^/      /' >&2
+        explain_log || true
         manifest_rows+=("$id|$ver|$b|$size|FAILED")
       fi
       continue ;;
   esac
 
-  # 走到这里 = 推成功了。但退出码 0 也可能是 --skip-duplicate 把「已存在」跳过了
-  # （实测：409 时它退出码仍是 0），所以成功路径也要看一眼输出。
+  # 走到这里 = dotnet 报成功了。两件事都要查：
+  #   1) 退出码 0 也可能是 --skip-duplicate 把「已存在」跳过了（实测：409 时它退出码仍是 0）
+  #   2) 就算日志里没有「已存在」，也不代表真传上去了 —— 见 published_of 的注释，
+  #      所以推完还要问一次 feed：覆盖的看 published 变没变，新推的看版本在不在。
   if grep -qiE 'already exists|skipped|409|conflict|duplicate' "$log"; then
     dup=$((dup+1))
     printf '  = %-70s %-24s %s（已存在，跳过）\n' "$b" "$ver" "$size"
     manifest_rows+=("$id|$ver|$b|$size|duplicate")
-  else
+  elif verify_pushed "$id" "$ver" "$exists" "$before"; then
     ok=$((ok+1))
     if [ "$exists" = true ]; then
       ovw=$((ovw+1))
@@ -300,6 +400,25 @@ for f in "${selected[@]}"; do
     else
       printf '  ✓ %-70s %-24s %s\n' "$b" "$ver" "$size"
       manifest_rows+=("$id|$ver|$b|$size|pushed")
+    fi
+  else
+    failed=$((failed+1))
+    echo "::error::nupkg-push: $b 没有真的传上去（dotnet 报了成功）" >&2
+    explain_log || true
+    if [ "$exists" = true ]; then
+      echo "      ↑ feed 上 $id $ver 的 published 没变 —— 它多半一个字节都没传。" >&2
+      echo "        推送目标是 $push_source。索引公布的发布端点是 http:// 时，新版客户端" >&2
+      echo "        （镜像里那个 10.x SDK）会拒推却仍退出 0；本次已换成 https 直连，" >&2
+      echo "        再出现这句就说明索引没读到、退回按 --source 推了。" >&2
+      case "$(bytes_state "$f" "$id" "$ver")" in
+        same)      echo "        feed 上那份的 sha256 与本地一致 —— 内容是对的，只是没有重传。" >&2 ;;
+        different) echo "        而且 feed 上那份的 sha256 与本地**不一致** —— 上面还是旧包，必须重传。" >&2 ;;
+        *)         echo "        （没能取回 feed 上那份来比对 sha256）" >&2 ;;
+      esac
+      manifest_rows+=("$id|$ver|$b|$size|FAILED(说成功但feed没变)")
+    else
+      echo "      ↑ 版本索引里查不到 $id $ver —— 这个包没传上去" >&2
+      manifest_rows+=("$id|$ver|$b|$size|FAILED(说成功但feed上查不到)")
     fi
   fi
 done

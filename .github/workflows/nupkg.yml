@@ -279,7 +279,11 @@ jobs:
         ref: ${{ github.event.repository.default_branch }}
 
     # runner 镜像自带 dotnet，但版本随镜像变；dotnet nuget push 只需要一个能跑的 SDK，
-    # 这里钉住一个 LTS，免得哪天镜像里没有 dotnet 把上传整条链打断
+    # 这里钉住一个 LTS，免得哪天镜像里没有 dotnet 把上传整条链打断。
+    # 注意：这只保证 8.0.x「在」，**不决定实际用哪个** —— 没有 global.json 时 dotnet
+    # 取的是 PATH 上最新的那个 SDK（镜像里现在是 10.0.x）。推送脚本会把客户端版本和
+    # 推送目标打在头部；2026-09-29 那次 9 个包假成功就是 10.x 的客户端干的
+    # （服务索引公布的发布端点是 http://，它拒推还退出 0）。
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
