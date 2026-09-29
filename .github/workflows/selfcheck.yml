@@ -15,6 +15,10 @@ name: SDK self-check (published releases)
 #   - build.yml 跑完自动（读它留下的 release-plan 工件，与 test.yml 同一套路）
 #   - 手动 workflow_dispatch：可以指定任意历史 Release 的 tag，留空则取最近 5 个
 #
+# 自动链：build.yml →（本工作流）→ nupkg.yml。自检**全绿**（配置表期望的每个变体都有
+# 结果、且没有 ❌；⚠️ 不拦）的 Release 会自动交给 nupkg.yml 去推 nupkg；手动的体检
+# 不触发上传（那是来看现状的，要补传直接手动跑 nupkg.yml）。
+#
 # 注意：workflow_dispatch / workflow_run 都要求本文件已经在默认分支上才会被触发
 # （在 feature 分支上 `gh workflow run` 与 dispatch API 都是 404）—— 端到端验证必须
 # 等它合进 main。
@@ -316,11 +320,14 @@ jobs:
           report-${{ matrix.variant }}.md
           row-${{ matrix.variant }}.json
 
-  # 汇总：所有资产一张表（就是「可阅读的版本」），每份报告收在 <details> 里
+  # 汇总：所有资产一张表（就是「可阅读的版本」），每份报告收在 <details> 里；
+  # 全绿的 Release 在这里交给 nupkg.yml（`gh workflow run` 需要 actions: write）
   report:
     needs: check
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
     - uses: actions/checkout@v4
       with:
@@ -339,6 +346,10 @@ jobs:
 
         mapfile -t rows < <(find results -name 'row-*.json' 2>/dev/null | LC_ALL=C sort)
         echo "收到 ${#rows[@]} 份结果"
+
+        # 期望集全靠这张表。表读不到时 jq 只会静默给空 —— 那样每个 tag 都会变成
+        # 「没有期望值可对」的 ❌，看着像资产有问题，其实是表没了，先拦住
+        [ -f config/targets.json ] || { echo "::error::找不到 config/targets.json —— 没法算期望变体"; exit 1; }
 
         # ── 期望集（config 里 enabled 的行）→ 缺哪些变体 ─────────────────────
         # 「这个 Release 应该有哪几个变体」只看配置表，不看构建实际发了什么。
@@ -397,6 +408,33 @@ jobs:
         done
         echo "按配置表补 $(grep -c . missing.json || true) 行「缺失」"
 
+        # ── 逐 tag 结论：全绿 = 期望的每个变体都有结果、且没有 ❌ ──────────────
+        # 判据只看结果行的 status：bad（有问题）/ error（没跑成）/ missing（按配置表补的
+        # 缺行）都算 ❌；⚠️ 不算 —— 拿「未 strip」这类提示当门禁，会让 10/11 永远进不了
+        # 自动上传。归位后的行（上面已写回盘）按**真身变体**参与，所以那种「名叫 glibc、
+        # 实为 musl」的资产会让 lns23 记一条缺行，整条链因此不触发。
+        declare -A ROW_STATUS=()
+        for f in "${rows[@]:-}"; do
+          [ -f "$f" ] || continue
+          ROW_STATUS["$(jq -r '.tag' "$f")|$(jq -r '.variant // ""' "$f")"]=$(jq -r '.status // "ok"' "$f")
+        done
+
+        clean=(); unclean=()
+        for t in "${tags_seen[@]:-}"; do
+          [ -n "$t" ] || continue
+          exp=${TAG_EXPECT[$t]:-}
+          reason=""
+          if [ -z "$exp" ]; then
+            reason="不在 config/targets.json 的 enabled 条目里，没有期望值可对"
+          else
+            for v in $exp; do
+              s=${ROW_STATUS["$t|$v"]:-missing}
+              [ "$s" = ok ] || reason="$reason${reason:+；}$v: $s"
+            done
+          fi
+          if [ -z "$reason" ]; then clean+=("$t"); else unclean+=("$t（$reason）"); fi
+        done
+
         out="sdk-selfcheck-report.md"
         {
           echo "## SDK 自检总表"
@@ -448,6 +486,17 @@ jobs:
             fi
           fi
           echo
+          echo "### 结论"
+          echo
+          if [ "${#clean[@]}" -eq 0 ] && [ "${#unclean[@]}" -eq 0 ]; then
+            echo "没有可判的 tag（没收到结果，或结果里的 tag 在配置表里查不到）。"
+          fi
+          for t in ${clean[@]+"${clean[@]}"}; do echo "- ✅ \`$t\` 全绿"; done
+          for u in ${unclean[@]+"${unclean[@]}"}; do echo "- ❌ $u"; done
+          echo
+          echo "> 全绿 = 配置表期望的每个变体都有结果且没有 ❌（⚠️ 不拦）。build.yml 触发的"
+          echo "> 那一轮里，全绿的 tag 会自动交给 nupkg.yml 上传 nupkg。"
+          echo
           echo "### 各资产报告"
           echo
           for r in $(find results -name 'report-*.md' 2>/dev/null | LC_ALL=C sort); do
@@ -462,6 +511,12 @@ jobs:
         cat "$out" >> "$GITHUB_STEP_SUMMARY"
         head -n 20 "$out"   # 日志里给个总表；完整报告（含各资产明细）看 job summary 或工件
 
+        # 机器可读的一份：下一步（触发 nupkg.yml）只认这个文件
+        : > clean-tags.txt
+        for t in ${clean[@]+"${clean[@]}"}; do echo "$t" >> clean-tags.txt; done
+        clean_list=$(paste -sd' ' clean-tags.txt 2>/dev/null || true)
+        echo "全绿 tag：${clean_list:-<无>}"
+
     - name: 上传总表
       if: always()
       uses: actions/upload-artifact@v4
@@ -469,4 +524,34 @@ jobs:
         name: sdk-selfcheck-report
         retention-days: 30
         if-no-files-found: warn
-        path: sdk-selfcheck-report.md
+        path: |
+          sdk-selfcheck-report.md
+          clean-tags.txt
+
+    # 自检全绿的 Release → 触发 nupkg.yml（把 PSA 里的 RID 专有包推到龙芯 feed）。
+    # 只在「build.yml 跑完自动触发的这一轮」里做：手动跑 selfcheck 是来体检历史版本的，
+    # 不该顺手把包推出去（要补传就直接手动触发 nupkg.yml）。
+    - name: 触发 nupkg 上传
+      if: ${{ github.event_name == 'workflow_run' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        REF: ${{ github.event.repository.default_branch }}
+      run: |
+        set -uo pipefail
+        mapfile -t tags < <(grep . clean-tags.txt 2>/dev/null || true)
+        if [ "${#tags[@]}" -eq 0 ]; then
+          echo "没有全绿的 Release，不触发 nupkg.yml（原因见上面的结论）"
+          exit 0
+        fi
+        echo "全绿：${tags[*]} → 触发 nupkg.yml"
+
+        # 输入用 JSON 从 stdin 传：dry_run 是 boolean，-f 会当字符串发（类型不匹配会被拒）
+        payload=$(jq -nc --arg t "${tags[*]}" '{release_tags:$t, dry_run:false}')
+        if printf '%s' "$payload" | gh workflow run nupkg.yml -R "$REPO" --ref "$REF" --json; then
+          echo "已触发（推了哪些包看 nupkg.yml 那次 run）"
+        else
+          # 触发不了不该把自检判红（第一版自检本来就不因检查结果变红）。常见原因：
+          # nupkg.yml 还没进默认分支 —— workflow_dispatch 要求文件在默认分支上
+          echo "::warning::触发 nupkg.yml 失败 —— 自检本身没有问题；要上传就手动触发 nupkg.yml"
+        fi
