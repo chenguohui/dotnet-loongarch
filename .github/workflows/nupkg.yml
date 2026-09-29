@@ -16,6 +16,11 @@ name: Upload LoongArch nupkgs
 #   - selfcheck.yml 自检全绿后自动触发（build.yml → selfcheck.yml → nupkg.yml），
 #     只传全绿的那些 tag；自检第一版只报告，所以「全绿」由那份报告算出来
 #
+# 覆盖：feed 上已有同 id+版本时**默认跳过**（自动触发那条链也走这个默认 —— 它只该
+# 补新版本，不该换掉 feed 上已有的东西）。手动触发时勾 overwrite=true 才覆盖：
+# 先照常推一次（服务端允许覆盖就一步到位），被 409 拒了才删掉那一版（用同一个 API
+# key）再推；删也删不掉、推也推不上，作为失败报出来。
+#
 # 两个前置条件（仓库管理员做一次）：
 #   1) Secrets 里配好 LOONGSON_API_KEY_NUGET / LOONGSON_API_KEY_LNUGET
 #   2) 本文件必须在**默认分支**上，selfcheck.yml 的 `gh workflow run` 才找得到它
@@ -43,6 +48,11 @@ on:
       dry_run:
         description: '只列出将要上传的包，不真推'
         required: true
+        type: boolean
+        default: false
+      overwrite:
+        description: '覆盖 feed 上已有的同 id+版本；默认跳过已有的'
+        required: false
         type: boolean
         default: false
       include_file:
@@ -236,7 +246,7 @@ jobs:
         {
           echo "### nupkg 上传计划（$n 个资产）"
           echo
-          echo "- 模式：$([ '${{ inputs.dry_run }}' = 'true' ] && echo '**dry-run**（只列不推）' || echo '真推')"
+          echo "- 模式：$([ '${{ inputs.dry_run }}' = 'true' ] && echo '**dry-run**（只列不推）' || echo '真推')$([ '${{ inputs.overwrite }}' = 'true' ] && echo '，**覆盖** feed 上已有的同版本（被拒才删了重推）' || echo '，已有的版本跳过')"
           echo "- 白名单：\`${{ inputs.include_file }}\`"
           echo
           if [ "$n" -gt 0 ]; then
@@ -307,6 +317,7 @@ jobs:
         SOURCE: ${{ matrix.source }}
         SECRET_NAME: ${{ matrix.key_secret }}
         DRY_RUN: ${{ inputs.dry_run }}
+        OVERWRITE: ${{ inputs.overwrite }}
         INCLUDE: ${{ inputs.include_file }}
         LOONGSON_API_KEY_NUGET: ${{ secrets.LOONGSON_API_KEY_NUGET }}
         LOONGSON_API_KEY_LNUGET: ${{ secrets.LOONGSON_API_KEY_LNUGET }}
@@ -334,6 +345,7 @@ jobs:
                --label '${{ matrix.tag }} / ${{ matrix.variant }}'
                --manifest 'nupkg-manifest-${{ matrix.variant }}.txt' )
         [ "$DRY_RUN" = true ] && args+=( --dry-run )
+        [ "$OVERWRITE" = true ] && args+=( --overwrite )
 
         status=0
         bash scripts/nupkg-push.sh "${args[@]}" 2>&1 | tee "push-${{ matrix.variant }}.log" || status=$?
