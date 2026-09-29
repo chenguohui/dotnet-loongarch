@@ -1,0 +1,357 @@
+name: Upload LoongArch nupkgs
+
+# 把 Release 里 Private.SourceBuilt.Artifacts.*.tar.gz（PSA；作为**永久资产**随 Release
+# 保存，所以历史版本可以随时回填）解出来的 RID 专有 nupkg（含 ELF、社区不生成的那批，
+# 白名单 config/nupkg.include.txt）推到龙芯 NuGet：
+#   ABI1.0（lns8）        → https://nuget.loongnix.cn/v3/index.json
+#   ABI2.0（lns23/alpine）→ https://lnuget.loongnix.cn/v3/index.json
+# feed 与密钥的对应关系在 config/targets.json 的 abis 表（nuget_source /
+# nuget_api_key_secret）：两个 ABI 的包 id / 版本完全相同，只能靠 feed 隔离，
+# 推错站点无法撤销 —— 所以 feed 由 ABI 查表得出，不从 tag 名里猜。
+# 密钥只从仓库 secrets 取（LOONGSON_API_KEY_NUGET / LOONGSON_API_KEY_LNUGET），
+# 不进仓库、不进日志（脚本会把失败输出里的密钥抹掉再打）。
+#
+# 触发方式：
+#   - 手动 workflow_dispatch：补传/回填历史版本；留空 = config 里 enabled 的全部
+#   - selfcheck.yml 自检全绿后自动触发（build.yml → selfcheck.yml → nupkg.yml），
+#     只传全绿的那些 tag；自检第一版只报告，所以「全绿」由那份报告算出来
+#
+# 两个前置条件（仓库管理员做一次）：
+#   1) Secrets 里配好 LOONGSON_API_KEY_NUGET / LOONGSON_API_KEY_LNUGET
+#   2) 本文件必须在**默认分支**上，selfcheck.yml 的 `gh workflow run` 才找得到它
+#
+# 已知边界（都不是本工作流能自动判的）：
+#   - PSA 与 SDK 资产是同一次构建的两份产物，但自检只看 SDK。v9.0.121-abi2.0 那种
+#     「文件名说 glibc、内容是 musl」的资产，靠自检拦下整条链（该 tag 不绿 → 不自动推）；
+#     手动推时可以 -f variant= 只处理某一个变体，推之前先看一眼自检总表
+#   - 包版本在 feed 上不可覆盖（BaGet 对已存在的 id+版本回 409，脚本按 --skip-duplicate
+#     归入「已存在，跳过」）。所以重新构建后**同版本**的新包推不上去，得先在 feed 上
+#     删掉那一版；版本没变的重跑只会得到一串「已存在」
+on:
+  workflow_dispatch:
+    inputs:
+      release_tags:
+        description: '要上传的 Release tag（空格或逗号分隔）；留空 = config/targets.json 里 enabled 的全部'
+        required: false
+        type: string
+        default: ''
+      variant:
+        description: '只处理某个变体（lns8 / lns23 / alpine）；留空 = 全部'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: '只列出将要上传的包，不真推'
+        required: true
+        type: boolean
+        default: false
+      include_file:
+        description: '白名单文件'
+        required: true
+        type: string
+        default: config/nupkg.include.txt
+
+# 同一时刻只推一份：两个 run 同时推同名包只会互相争 409
+concurrency:
+  group: nupkg-upload
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # tag → ABI → feed；再把该 Release 的 PSA 资产展开成上传矩阵（一个 PSA 一行）
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_assets: ${{ steps.plan.outputs.has_assets }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+
+    - name: 规划上传矩阵
+      id: plan
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        TAGS_INPUT: ${{ inputs.release_tags }}
+        VARIANT: ${{ inputs.variant }}
+      run: |
+        set -uo pipefail
+
+        CFG=config/targets.json
+        [ -f "$CFG" ] || { echo "::error::找不到 $CFG"; exit 1; }
+
+        # ── 1. abi → feed / 密钥 secret 名 ──────────────────────────────────
+        declare -A FEED=() KEYNAME=()
+        while IFS=$'\t' read -r a s k; do
+          [ -n "$a" ] || continue
+          [ -n "$s" ] || { echo "::error::$CFG 里 $a 没有 nuget_source"; exit 1; }
+          [ -n "$k" ] || { echo "::error::$CFG 里 $a 没有 nuget_api_key_secret"; exit 1; }
+          FEED[$a]=$s; KEYNAME[$a]=$k
+        done < <(jq -r '.abis | to_entries[]
+                        | [.key, (.value.nuget_source // ""), (.value.nuget_api_key_secret // "")]
+                        | @tsv' "$CFG")
+
+        # 两个 ABI 的包 id / 版本一模一样 —— 两边指向同一个 feed 就等于没隔离，拒绝跑
+        if [ "${#FEED[@]}" -gt 1 ]; then
+          same=$(printf '%s\n' "${FEED[@]}" | LC_ALL=C sort | uniq -d | head -n1)
+          [ -z "$same" ] || { echo "::error::两个 ABI 的 feed 相同（$same）—— 同名包无法隔离，拒绝上传"; exit 1; }
+        fi
+
+        # ── 2. tag → abi + 该 tag 的变体(rid) ───────────────────────────────
+        # 用**全部**条目（不限 enabled）：手动补传历史版本时 enabled=false 的占位行
+        # 也可能要推；enabled 只用来决定「留空输入」时处理哪些 tag
+        declare -A TAG_ABI=() TAG_VARS=() TAG_ON=()
+        while IFS=$'\t' read -r t a on vs; do
+          [ -n "$t" ] || continue
+          TAG_ABI[$t]=$a; TAG_VARS[$t]=$vs; TAG_ON[$t]=$on
+        done < <(jq -r '
+          .variants as $V
+          | .targets
+          | map(. + { sdk_version: (.sdk_version // (.ref | sub("^v"; "") | sub("-abi[12]\\.0$"; ""))) })
+          | map(. + { release_tag: (.release_tag // ("v" + .sdk_version + "-" + .abi)) })
+          | group_by(.release_tag)
+          | .[]
+          | [ .[0].release_tag,
+              .[0].abi,
+              (if (map(.enabled) | any) then "true" else "false" end),
+              (map({ v: .variant, r: $V[.variant].rid }) | unique_by(.v) | sort_by(.v)
+               | map("\(.v):\(.r)") | join(",")) ]
+          | @tsv
+        ' "$CFG")
+
+        # ── 3. 要处理哪些 tag ───────────────────────────────────────────────
+        tags=()
+        if [ -n "${TAGS_INPUT//[[:space:],]/}" ]; then
+          read -r -a tags <<< "${TAGS_INPUT//,/ }"
+        else
+          mapfile -t tags < <(for t in "${!TAG_ON[@]}"; do
+                                [ "${TAG_ON[$t]}" = true ] && printf '%s\n' "$t"
+                              done | LC_ALL=C sort)
+        fi
+        mapfile -t tags < <(printf '%s\n' "${tags[@]:-}" | grep . | LC_ALL=C sort -u)
+        if [ "${#tags[@]}" -eq 0 ]; then
+          echo "::error::没有要处理的 tag（输入为空，且配置表里没有 enabled 的条目？）"
+          exit 1
+        fi
+        echo "待处理 tag：${tags[*]}"
+
+        if [ -n "$VARIANT" ]; then
+          jq -e --arg v "$VARIANT" '.variants | has($v)' "$CFG" > /dev/null \
+            || { echo "::error::未知变体 $VARIANT（可选：$(jq -r '.variants | keys | join(" / ")' "$CFG")）"; exit 1; }
+        fi
+
+        # ── 4. 每个 tag 的 PSA 资产 → 一行矩阵 ──────────────────────────────
+        # 处理不了的 tag（表里没有 / Release 读不到 / 没有 PSA）记 error 并继续：
+        # 一次把手动输入里的问题全报出来，最后统一让 plan 失败 —— 失败 = upload 不跑，
+        # 一个包都不推（宁可不推，也不猜着推）
+        rows='[]'; errs=0
+        for tag in "${tags[@]}"; do
+          abi=${TAG_ABI[$tag]:-}
+          if [ -z "$abi" ]; then
+            echo "::error::$tag 不在 $CFG 里 —— 不知道推去哪个 feed（先补表或检查 tag 拼写）"
+            errs=$((errs+1)); continue
+          fi
+          source=${FEED[$abi]}
+          keyname=${KEYNAME[$abi]}
+
+          if ! assets=$(gh release view "$tag" -R "$REPO" --json assets -q '.assets[].name' 2>/dev/null); then
+            hint='Release 不存在？tag 拼写？注意要带 v 前缀'
+            [ "${TAG_ON[$tag]}" = true ] || hint="配置表里这条是 enabled=false，多半还没发布；$hint"
+            echo "::error::$tag 读不到（$hint）"
+            errs=$((errs+1)); continue
+          fi
+          psas=$(printf '%s\n' "$assets" | grep -E '^Private\.SourceBuilt\.Artifacts\..*\.tar\.gz$' || true)
+          if [ -z "$psas" ]; then
+            echo "::error::$tag 里没有 Private.SourceBuilt.Artifacts.*.tar.gz —— 没有可推的包"
+            errs=$((errs+1)); continue
+          fi
+
+          matched=(); filtered=()
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            stem=${asset#Private.SourceBuilt.Artifacts.}; stem=${stem%.tar.gz}
+
+            # 资产名末尾的 RID → 变体。按配置表里的 rid 认后缀（版本里有 rc.1.26425.128
+            # 这种带点的段，不能按最后一个点切）；要求 RID 前面是 - 或 .
+            # （`-musl-loongarch64` 因此不会被 `linux-loongarch64` 误命中）
+            rid=""; variant=""; n=0
+            for pair in ${TAG_VARS[$tag]//,/ }; do
+              r=${pair##*:}
+              case "$stem" in *[-.]"$r") rid=$r; variant=${pair%%:*}; n=$((n+1)) ;; esac
+            done
+            if [ "$n" -eq 0 ]; then
+              echo "::warning::$tag/$asset 的 RID 后缀不在该 tag 的变体里（${TAG_VARS[$tag]//,/, }），跳过"
+              continue
+            elif [ "$n" -gt 1 ]; then
+              echo "::warning::$tag/$asset 同时匹配多个变体（$rid 在表里重复？），跳过"
+              continue
+            fi
+
+            matched+=("$variant")
+            [ -z "$VARIANT" ] || [ "$variant" = "$VARIANT" ] || continue
+            filtered+=("$variant")
+
+            row=$(jq -nc --arg t "$tag" --arg a "$asset" --arg v "$variant" --arg r "$rid" \
+                        --arg abi "$abi" --arg s "$source" --arg k "$keyname" \
+                        '{tag:$t, asset:$a, variant:$v, rid:$r, abi:$abi, source:$s, key_secret:$k}')
+            rows=$(jq -c --argjson r "$row" '. + [$r]' <<<"$rows")
+          done <<< "$psas"
+
+          # 「发了一半」在 Release 页面上看不出来：拿配置表的变体名单对一遍
+          want=$(printf '%s\n' "${TAG_VARS[$tag]}" | tr ',' '\n' | sed 's/:.*//' | LC_ALL=C sort -u | paste -sd' ' -)
+          got=$(printf '%s\n' "${matched[@]:-}" | grep . | LC_ALL=C sort -u | paste -sd' ' -)
+          [ "$got" = "$want" ] \
+            || echo "::warning::$tag 的 PSA 只覆盖变体 ${got:-<无>}，配置表里该 tag 有 $want"
+
+          # 变体过滤把该 tag 的资产全滤掉了 —— 说出来，别让人以为推过了
+          if [ "${#matched[@]}" -gt 0 ] && [ "${#filtered[@]}" -eq 0 ]; then
+            echo "::warning::$tag 没有变体 $VARIANT 的 PSA（该 tag 只有：${want}）"
+          fi
+
+          # 没指定变体过滤，PSA 却一个都落不到该 tag 的变体上 —— 表或资产名对不上，
+          # 这时候「0 行」不是正常空结果（比如手动补传历史的 tag 名写成了别的版本）
+          if [ -z "$VARIANT" ] && [ "${#matched[@]}" -eq 0 ]; then
+            echo "::error::$tag 的 PSA 没有一个能落到该 tag 的变体上（配置表：$want）"
+            errs=$((errs+1))
+          fi
+
+          # 同一个变体有多份 PSA（同一次构建重复上传、或同 tag 上跑了两轮构建）：
+          # 包版本相同、内容未必相同，推哪一份没有依据 —— 猜错就是把错的包推上去
+          dup=$(printf '%s\n' "${matched[@]:-}" | grep . | LC_ALL=C sort | uniq -d | paste -sd' ' -)
+          if [ -n "$dup" ]; then
+            echo "::error::$tag 里变体 $dup 有多份 PSA —— 推哪一份没有依据，先清掉多余的 Release 资产"
+            errs=$((errs+1))
+          fi
+        done
+
+        n=$(jq 'length' <<<"$rows")
+        echo "has_assets=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        # $GITHUB_OUTPUT 的值必须是单行 —— jq -c 保证
+        printf 'matrix=%s\n' "$(jq -c '{include: .}' <<<"$rows")" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### nupkg 上传计划（$n 个资产）"
+          echo
+          echo "- 模式：$([ '${{ inputs.dry_run }}' = 'true' ] && echo '**dry-run**（只列不推）' || echo '真推')"
+          echo "- 白名单：\`${{ inputs.include_file }}\`"
+          echo
+          if [ "$n" -gt 0 ]; then
+            echo "| Release | ABI | 变体 | RID | PSA 资产 | feed | 密钥 secret |"
+            echo "| --- | --- | --- | --- | --- | --- | --- |"
+            jq -r '.[] | "| `\(.tag)` | \(.abi) | \(.variant) | \(.rid) | `\(.asset)` | `\(.source)` | `\(.key_secret)` |"' <<<"$rows"
+          else
+            echo "没有要上传的资产。"
+          fi
+          if [ "$errs" -gt 0 ]; then
+            echo
+            echo "**有 $errs 个 tag 处理不了（见日志里的 error 注解）—— 本次一个包都不会推。**"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        [ "$errs" -eq 0 ] || exit 1
+
+  # 每个 (tag × PSA) 一个 job：下载 → 解包 → 按白名单推 → 留一份清单
+  upload:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_assets == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+
+    # runner 镜像自带 dotnet，但版本随镜像变；dotnet nuget push 只需要一个能跑的 SDK，
+    # 这里钉住一个 LTS，免得哪天镜像里没有 dotnet 把上传整条链打断
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Download PSA
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        mkdir -p psa
+        gh release download '${{ matrix.tag }}' -R "$GITHUB_REPOSITORY" \
+          --pattern '${{ matrix.asset }}' --dir psa --clobber
+
+        # 下载完整性：gh 会中途断流（自检那边实测过一次 167MiB 只下到 160MiB），
+        # 截断的 tar.gz 要到解包中途才炸，那时错误只剩一句「解包失败」。先比字节数。
+        want=$(gh release view '${{ matrix.tag }}' -R "$GITHUB_REPOSITORY" \
+                 --json assets -q '.assets[] | select(.name == "${{ matrix.asset }}") | .size')
+        got=$(stat -c%s "psa/${{ matrix.asset }}")
+        if [ "$want" != "$got" ]; then
+          echo "::error::${{ matrix.asset }} 下载不完整：Release 登记 $want 字节，实际 $got 字节"
+          exit 1
+        fi
+        ls -l psa
+
+    - name: 解出 nupkg
+      run: |
+        set -euo pipefail
+        mkdir -p pkgs
+        tar -xzf "psa/${{ matrix.asset }}" -C pkgs
+        echo "nupkg 总数：$(find pkgs -type f -name '*.nupkg' | wc -l)"
+        du -sh pkgs
+
+    - name: Push
+      env:
+        SOURCE: ${{ matrix.source }}
+        SECRET_NAME: ${{ matrix.key_secret }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        INCLUDE: ${{ inputs.include_file }}
+        LOONGSON_API_KEY_NUGET: ${{ secrets.LOONGSON_API_KEY_NUGET }}
+        LOONGSON_API_KEY_LNUGET: ${{ secrets.LOONGSON_API_KEY_LNUGET }}
+      run: |
+        set -uo pipefail
+
+        # 配置表里写的是 secret 名，这里显式映射成值：${{ secrets[...] }} 的动态下标
+        # 取不到时只是空串，失败会发生在推送那一步（看不出是名字写错还是没配）
+        case "$SECRET_NAME" in
+          LOONGSON_API_KEY_NUGET)  API_KEY=$LOONGSON_API_KEY_NUGET ;;
+          LOONGSON_API_KEY_LNUGET) API_KEY=$LOONGSON_API_KEY_LNUGET ;;
+          *) echo "::error::config/targets.json 要求的 secret '$SECRET_NAME' 本工作流没有映射"; exit 2 ;;
+        esac
+        if [ "$DRY_RUN" != true ] && [ -z "$API_KEY" ]; then
+          echo "::error::secret $SECRET_NAME 是空的 —— 在 Settings → Secrets and variables → Actions 里配置它"
+          exit 2
+        fi
+
+        args=( --packages pkgs
+               --include-file "$INCLUDE"
+               --source "$SOURCE"
+               --api-key "$API_KEY"
+               --label '${{ matrix.tag }} / ${{ matrix.variant }}'
+               --manifest 'nupkg-manifest-${{ matrix.variant }}.txt' )
+        [ "$DRY_RUN" = true ] && args+=( --dry-run )
+
+        status=0
+        bash scripts/nupkg-push.sh "${args[@]}" 2>&1 | tee "push-${{ matrix.variant }}.log" || status=$?
+
+        { echo "### nupkg 推送 · ${{ matrix.tag }} / ${{ matrix.variant }}"
+          echo
+          echo '```'
+          cat "push-${{ matrix.variant }}.log"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit $status
+
+    # 「这次到底推了哪些包、结果如何」的存底（feed 变更/补传时好回查）
+    - name: Upload manifest
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: nupkg-manifest--${{ matrix.tag }}--${{ matrix.variant }}
+        retention-days: 90
+        if-no-files-found: warn
+        path: |
+          nupkg-manifest-${{ matrix.variant }}.txt
+          push-${{ matrix.variant }}.log

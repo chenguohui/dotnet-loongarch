@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "构建目标表 —— build.yml / selfcheck.yml 共用的唯一事实来源。",
+    "构建目标表 —— build.yml / selfcheck.yml / nupkg.yml 共用的唯一事实来源。",
     "",
     "targets[]  每条 = 一个 (ref × 构建变体)。同一个 release_tag 的多个变体（如 lns23 + alpine）",
     "           合并发布到同一个 GitHub Release。",
@@ -23,6 +23,10 @@
     "",
     "abis 表：",
     "  elf_flags    ABI 判据，readelf -h 的 Flags（构建时门禁与发布后自检共用，需 LC_ALL=C）",
+    "  nuget_source        该 ABI 的 nupkg 推送目标（nupkg.yml）。两个 ABI 的包 id / 版本",
+    "                      完全相同，只能靠 feed 隔离 —— 推错站点无法撤销，所以 ABI 与 feed",
+    "                      的对应关系写在这里，由脚本查表，不从 tag 名猜",
+    "  nuget_api_key_secret 上面那个 feed 的 API key 在仓库 secrets 里的**名字**（值不进配置表）",
     "",
     "variants 表：",
     "  变体名 alpine 指 musl libc 的那套构建（镜像基于 alpine）。rid 与 docker_tag 里的",
@@ -33,16 +37,20 @@
     "                               musl 工具链不做符号版本化 —— alpine 产物里一个 GLIBCXX_ 符号",
     "                               都没有（实测 11.0.100-rc.1），所以留空；glibc 变体取实测上限",
     "",
-    "只在 test.yml / nupkg.yml 里用到的键（binfmt_image、test_image、nuget_source 等）不在这份",
-    "配置里 —— 那些工作流尚未合并，等它们搬过来时再加进对应的表。"
+    "只在 test.yml 里用到的键（binfmt_image、binfmt_arch、runtime_test、test_image、test_deps、",
+    "test_invariant）不在这份配置里 —— test.yml 尚未合并，等它搬过来时再加进对应的表。"
   ],
 
   "abis": {
     "abi1.0": {
-      "elf_flags": "0x3"
+      "elf_flags": "0x3",
+      "nuget_source": "https://nuget.loongnix.cn/v3/index.json",
+      "nuget_api_key_secret": "LOONGSON_API_KEY_NUGET"
     },
     "abi2.0": {
-      "elf_flags": "0x43"
+      "elf_flags": "0x43",
+      "nuget_source": "https://lnuget.loongnix.cn/v3/index.json",
+      "nuget_api_key_secret": "LOONGSON_API_KEY_LNUGET"
     }
   },
 

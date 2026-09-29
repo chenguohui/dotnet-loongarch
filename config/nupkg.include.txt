@@ -1,0 +1,46 @@
+# ============================================================================
+# nupkg 上传白名单 —— nupkg.yml / scripts/nupkg-push.sh 使用
+#
+# 匹配对象是 nupkg 的「文件名」（即 <包 id>.<版本>.nupkg，含 .nupkg 后缀），
+# 不是路径。每一行一个 glob：
+#   #  开头（或行尾）  注释，空行忽略
+#   !  开头            排除规则，优先级高于包含规则（命中即不上传）
+#   其余               包含规则（命中即上传）
+#
+# 判定：先扫一遍 ! 规则 —— 命中则排除；否则再扫包含规则 —— 命中则上传；
+#       两边都没命中 = 不上传（不报错，脚本会把未命中的列出来）。
+#
+# 注意：ABI1.0 与 ABI2.0 的包 id / 版本完全相同，靠 feed 区分
+#       （ABI1.0 -> nuget.loongnix.cn，ABI2.0 -> lnuget.loongnix.cn），
+#       不要试图在这份白名单里区分 ABI。
+# ============================================================================
+
+# ---- 默认规则：只上传 id 里带 loongarch64 的 RID 专有包 --------------------
+# 这些就是「含 ELF、必须按 ABI 分开」的那批包（社区不生成，龙芯自维护）。
+*loongarch64*.nupkg
+
+# ---- 排除 ------------------------------------------------------------------
+
+# 符号包（体积大，且不属于功能包）
+!*.symbols.nupkg
+!*.snupkg
+
+# ---- 需要收紧时：把上面第一条换成下面这份显式清单 --------------------------
+# 这是已确认含 ELF 的 11 个伴生包（新世界/旧世界均适用；alpine 变体的 RID 是
+# linux-musl-loongarch64，把 linux-loongarch64 换成它即可）。要注意的是这份清单是
+# 按某个版本的人工盘点结果，若上游新增/改名，用默认规则不会漏，用清单会漏。
+#
+#   Microsoft.NETCore.App.Runtime.linux-loongarch64.*.nupkg
+#   Microsoft.AspNetCore.App.Runtime.linux-loongarch64.*.nupkg
+#   Microsoft.NETCore.App.Host.linux-loongarch64.*.nupkg
+#   Microsoft.NETCore.App.Crossgen2.linux-loongarch64.*.nupkg
+#   Microsoft.NETCore.App.Runtime.NativeAOT.linux-loongarch64.*.nupkg
+#   runtime.linux-loongarch64.Microsoft.DotNet.ILCompiler.*.nupkg
+#   runtime.linux-loongarch64.Microsoft.NETCore.DotNetAppHost.*.nupkg
+#   runtime.linux-loongarch64.Microsoft.NETCore.ILAsm.*.nupkg
+#   runtime.linux-loongarch64.Microsoft.NETCore.ILDAsm.*.nupkg
+#   runtime.linux-loongarch64.Microsoft.NETCore.TestHost.*.nupkg
+#   runtime.linux-loongarch64.runtime.native.System.IO.Ports.*.nupkg
+#
+# 单个包排除示例（注意 ! 优先，写在包含规则之后也能生效）：
+#   !Microsoft.NETCore.App.Crossgen2.linux-loongarch64.*.nupkg
