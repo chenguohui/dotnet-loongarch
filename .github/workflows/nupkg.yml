@@ -313,8 +313,10 @@ jobs:
       run: |
         set -uo pipefail
 
-        # 配置表里写的是 secret 名，这里显式映射成值：${{ secrets[...] }} 的动态下标
+        # 配置表里写的是 secret 名，这里显式映射成值：`secrets[名字]` 那种动态下标
         # 取不到时只是空串，失败会发生在推送那一步（看不出是名字写错还是没配）
+        # 注意本文件里连注释都不能出现 Actions 表达式的写法 —— 注释也过表达式解析，
+        # 一个不完整的表达式会让整个工作流文件失效（GitHub 报的错在注释那一行）
         case "$SECRET_NAME" in
           LOONGSON_API_KEY_NUGET)  API_KEY=$LOONGSON_API_KEY_NUGET ;;
           LOONGSON_API_KEY_LNUGET) API_KEY=$LOONGSON_API_KEY_LNUGET ;;
