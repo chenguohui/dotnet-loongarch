@@ -13,7 +13,12 @@
 #   !  排除规则，优先级高于包含规则
 #   其余为包含 glob，按「文件名」匹配（<包 id>.<版本>.nupkg）
 #
-# 退出码：0 = 全部成功（含 dry-run）；1 = 有包推送失败；2 = 参数或环境错误
+# 「已存在」怎么判：**先查 feed 的版本索引**（PackageBaseAddress 的
+# <id>/index.json），命中就跳过、不推。原因见下面 feed_has 处的注释 —— 靠
+# dotnet 的退出码分类会把「已存在」记成「成功」。dry-run 也查（只读），所以
+# dry-run 能预告真实的推送结果（会推哪些、哪些会被跳过）。
+#
+# 退出码：0 = 全部成功（含 dry-run、含全部已存在）；1 = 有包推送失败；2 = 参数或环境错误
 # ============================================================================
 set -uo pipefail
 
@@ -91,6 +96,34 @@ pkg_meta() {
   printf '%s\t%s' "$id" "${ver:-?}"
 }
 
+# ------------------------------------------------- feed 上有没有这个版本 ----
+# 为什么不用 `dotnet nuget push --skip-duplicate` 的退出码判断：**已存在时它退出码
+# 还是 0**（只打一条 warning），按退出码分类会把「已存在」全记成「成功」——
+# 2026-09-29 的 run 36563546210 就报了「成功 9，已存在 0」，而 9 个包在 feed 上
+# 本来就都有（BaGet 对已存在的 id+版本回 409），feed 上什么都没变。
+# 所以先自己问 feed：版本索引是权威的，顺带省掉白传的几十 MB。
+feed_base=""
+if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # 服务索引里公布的是 http://（实测），nginx 再 301 到 https；GET 跟跳转即可
+  feed_base=$(curl -fsSL --max-time 30 "$SOURCE" 2>/dev/null \
+    | jq -r '.resources[]? | select(."@type" == "PackageBaseAddress/3.0.0") | ."@id"' 2>/dev/null \
+    | head -1)
+  feed_base=${feed_base%/}
+fi
+if [ -z "$feed_base" ]; then
+  echo "::warning::nupkg-push: 读不到 $SOURCE 的 PackageBaseAddress（v3 服务索引？）——" \
+       "只能按 dotnet 的退出码判断，已存在的包会被记成「成功」" >&2
+fi
+
+# 0 = feed 上已有该 id+版本；1 = 没有；2 = 查不了（网络/工具缺失，按「没有」处理）
+feed_has() {
+  [ -n "$feed_base" ] || return 2
+  local idl idx
+  idl=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  idx=$(curl -fsSL --max-time 30 "$feed_base/$idl/index.json" 2>/dev/null) || return 2
+  printf '%s' "$idx" | jq -e --arg v "$2" '.versions | index($v)' >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------- 筛选 ----
 mapfile -t all < <(find "$PACKAGES" -type f -name '*.nupkg' | LC_ALL=C sort)
 selected=(); excluded=(); unmatched=()
@@ -143,6 +176,15 @@ for f in "${selected[@]}"; do
     *) echo "::warning::nupkg-push: $b 的 nuspec id 为 '$id'，不含 loongarch64（名字反常？）" >&2 ;;
   esac
 
+  # feed 上已有同 id+版本：跳过（BaGet 不接受覆盖，推了也是 409 跳过）。
+  # dry-run 也查，好让 dry-run 预告真实结果。
+  if feed_has "$id" "$ver"; then
+    dup=$((dup+1))
+    printf '  = %-70s %-24s %s（feed 上已有，跳过）\n' "$b" "$ver" "$size"
+    manifest_rows+=("$id|$ver|$b|$size|$([ "$DRY_RUN" = true ] && echo 'dry-run(duplicate)' || echo duplicate)")
+    continue
+  fi
+
   if [ "$DRY_RUN" = true ]; then
     printf '  [dry-run] %-70s %-24s %s\n' "$b" "$ver" "$size"
     manifest_rows+=("$id|$ver|$b|$size|dry-run")
@@ -151,9 +193,17 @@ for f in "${selected[@]}"; do
 
   if dotnet nuget push "$f" --source "$SOURCE" --api-key "$API_KEY" \
        --skip-duplicate --timeout "$PUSH_TIMEOUT" > "$log" 2>&1; then
-    ok=$((ok+1))
-    printf '  ✓ %-70s %-24s %s\n' "$b" "$ver" "$size"
-    manifest_rows+=("$id|$ver|$b|$size|pushed")
+    # 查过 feed 说没有，dotnet 却报「已存在」—— 期间被人推了，或索引没列全。
+    # 退出码 0 不代表推上去了，所以成功路径也要看一眼输出。
+    if grep -qiE 'already exists|skipped|409|conflict|duplicate' "$log"; then
+      dup=$((dup+1))
+      printf '  = %-70s %-24s %s（已存在，跳过）\n' "$b" "$ver" "$size"
+      manifest_rows+=("$id|$ver|$b|$size|duplicate")
+    else
+      ok=$((ok+1))
+      printf '  ✓ %-70s %-24s %s\n' "$b" "$ver" "$size"
+      manifest_rows+=("$id|$ver|$b|$size|pushed")
+    fi
   elif grep -qiE 'already exists|409|conflict|duplicate' "$log"; then
     dup=$((dup+1))
     printf '  = %-70s %-24s %s（已存在，跳过）\n' "$b" "$ver" "$size"
@@ -168,7 +218,7 @@ done
 
 echo
 if [ "$DRY_RUN" = true ]; then
-  echo "dry-run 结束：将推送 ${#selected[@]} 个包到 $SOURCE"
+  echo "dry-run 结束：将推送 $(( ${#selected[@]} - dup )) 个包到 $SOURCE（另有 $dup 个 feed 上已有，会跳过）"
 else
   echo "推送结束：成功 $ok，已存在 $dup，失败 $failed（共 ${#selected[@]}）"
 fi
