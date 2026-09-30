@@ -36,9 +36,19 @@
 # ============================================================================
 set -uo pipefail
 
-# 单个包的推送超时（秒）。dotnet nuget push 的 -t|--timeout，默认只有 300 秒，
-# 大包（runtime/aspnetcore 上百 MB）跨境传到龙芯 feed 容易不够，放宽到 15 分钟。
-PUSH_TIMEOUT=900
+# 单个包的推送超时（秒）：**按体积算**，不用一个固定值。dotnet nuget push 的
+# -t|--timeout 默认才 300 秒；而 GitHub 的 westus runner 往北京 feed 传实测只有
+# 25–40 KB/s（2026-09-30）：10.6MB 用了 415 秒、26MB 用了 868 秒（固定的 900 秒
+# 只差 32 秒就撞线）、31.5MB 按同速率要 ~910 秒。所以按「1MB 给 60 秒（≈17KB/s，
+# 比实测慢一半也够）+ 300 秒余量」算；下限 900 秒（小包不必陪跑），上限 5400 秒
+# （链路再差也别无限等 —— 超了就该失败，不要占着 job）。链路正常时这些数用不到。
+PUSH_TIMEOUT_MIN=900 PUSH_TIMEOUT_MAX=5400
+push_timeout() {          # $1 = 包的字节数
+  local t=$(( $1 / 1048576 * 60 + 300 ))
+  [ "$t" -lt "$PUSH_TIMEOUT_MIN" ] && t=$PUSH_TIMEOUT_MIN
+  [ "$t" -gt "$PUSH_TIMEOUT_MAX" ] && t=$PUSH_TIMEOUT_MAX
+  printf '%s' "$t"
+}
 
 PACKAGES="" INCLUDE="" SOURCE="" API_KEY="" LABEL="" MANIFEST="" DRY_RUN=false OVERWRITE=false
 
@@ -335,7 +345,8 @@ for f in "${selected[@]}"; do
   # 就一步到位，feed 上不会出现「旧版删了、新版还没推上」的空窗；服务端回 409
   # 才删掉旧版、重推第二次。两条路都失败就按**失败**报出来，不再用
   # --skip-duplicate 把 409 吞成成功。
-  push_args=( "$f" --source "$push_source" --api-key "$API_KEY" --timeout "$PUSH_TIMEOUT" )
+  push_args=( "$f" --source "$push_source" --api-key "$API_KEY"
+              --timeout "$(push_timeout "$(stat -c %s "$f")")" )
   [ "$exists" = true ] || push_args+=( --skip-duplicate )
 
   verdict=""
