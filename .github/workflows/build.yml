@@ -52,6 +52,12 @@ jobs:
     - uses: actions/checkout@v4
 
     - id: gen
+      env:
+        # dispatch 的输入经 env 传给脚本（只用于回显）：值里带引号/反引号也不会被拼进脚本体
+        IN_FORK: ${{ inputs.fork }}
+        IN_TARGET: ${{ inputs.target }}
+        IN_RELEASE: ${{ inputs.release }}
+        IN_OVERWRITE: ${{ inputs.overwrite }}
       run: |
         set -euo pipefail
 
@@ -107,6 +113,30 @@ jobs:
         echo "releases=$(cat releases.json)" >> "$GITHUB_OUTPUT"
         echo "--- 构建矩阵 ---"; cat matrix.json
         echo "--- 发布矩阵 ---"; cat releases.json
+
+        # 摘要顶上先回显 dispatch 输入：release 关掉时 release job 会整块消失（job 级 if 为假、
+        # 矩阵都不展开），run 页上只剩一个 skipped 的 "release"。而这件事事后没法补救 ——
+        # dispatch 的输入值 API 里查不到（run 对象不含 inputs），重跑也只是复用当初的输入
+        # 把这个 job 再跳一次。所以在当时能看的地方留一行，别让人再靠反推。
+        {
+          echo "### 本次 dispatch 输入"
+          echo
+          if [ "${IN_RELEASE:-}" = "true" ]; then
+            echo "✅ 会创建 GitHub Release"
+          else
+            echo "⚠️ **不会**创建 GitHub Release（release 为空或 false）—— release job 整块不会出现，重跑也不会出现"
+          fi
+          echo
+          echo "| 输入 | 值 |"
+          echo "| --- | --- |"
+          echo "| fork | ${IN_FORK:-（空）} |"
+          echo "| target | ${IN_TARGET:-（空）} |"
+          echo "| release | ${IN_RELEASE:-（空）} |"
+          echo "| overwrite | ${IN_OVERWRITE:-（空）} |"
+          echo
+          echo "（schedule 触发时这四项本来就是空的，release job 不跑是设计如此）"
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
 
         {
           echo "### 本次构建目标"
@@ -337,6 +367,10 @@ jobs:
   # 某个 target 构建失败只影响它自己的 Release（失败的会跳过并告警，不会误发半份产物）
   release:
     needs: [prepare, build]
+    # inputs.release 关掉时这个 job 整块不会出现（job 级 if 为假，矩阵都不展开），run 页上
+    # 只剩一个 skipped 的 "release"，看着像出了故障。而 re-run 救不回来：它复用当初
+    # dispatch 的输入，`Re-run failed jobs` 只会把这个 job 再跳一次 —— 要发得重新 dispatch。
+    # 输入值已经回显在 prepare 的 job 摘要里（见上面那段），别再来这里反推。
     if: ${{ always() && inputs.release && needs.prepare.outputs.has_targets == 'true' && needs.build.result != 'cancelled' }}
     runs-on: ubuntu-latest
     permissions:
