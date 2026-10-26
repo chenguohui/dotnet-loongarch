@@ -79,16 +79,16 @@
   },
 
   "targets": [
-    {"target": "net9-abi2.0-lns23", "group": "net9", "enabled": false, "major": 9, "abi": "abi2.0", "variant": "lns23", "ref": "v9.0.122-abi2.0", "branding": "", "buildid": ""},
-    {"target": "net9-abi2.0-alpine", "group": "net9", "enabled": false, "major": 9, "abi": "abi2.0", "variant": "alpine", "ref": "v9.0.122-abi2.0", "branding": "", "buildid": ""},
-    {"target": "net9-abi1.0-lns8", "group": "net9", "enabled": false, "major": 9, "abi": "abi1.0", "variant": "lns8", "ref": "v9.0.122-abi1.0", "branding": "", "buildid": ""},
+    {"target": "net9-abi2.0-lns23", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "lns23", "ref": "v9.0.123-abi2.0", "branding": "", "buildid": ""},
+    {"target": "net9-abi2.0-alpine", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "alpine", "ref": "v9.0.123-abi2.0", "branding": "", "buildid": ""},
+    {"target": "net9-abi1.0-lns8", "group": "net9", "enabled": true, "major": 9, "abi": "abi1.0", "variant": "lns8", "ref": "v9.0.123-abi1.0", "branding": "", "buildid": ""},
 
-    {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.113-abi2.0", "branding": "release", "buildid": "20261004.4"},
-    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.113-abi2.0", "branding": "release", "buildid": "20261004.4"},
-    {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.113-abi1.0", "branding": "release", "buildid": "20261004.4"},
+    {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
+    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
+    {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.114-abi1.0", "branding": "release", "buildid": "20261022.26"},
 
-    {"target": "net11-abi2.0-lns23", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "lns23", "ref": "v11.0.100-rc.2.26504.105-abi2.0", "branding": "repodefault", "buildid": "20261004.5"},
-    {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-rc.2.26504.105-abi2.0", "branding": "repodefault", "buildid": "20261004.5"},
-    {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": true, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.2.26504.105-abi1.0", "branding": "repodefault", "buildid": "20261004.5"}
+    {"target": "net11-abi2.0-lns23", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "lns23", "ref": "v11.0.100-rc.3.26522.148-abi2.0", "branding": "repodefault", "buildid": "20261022.48"},
+    {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-rc.3.26522.148-abi2.0", "branding": "repodefault", "buildid": "20261022.48"},
+    {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": true, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.3.26522.148-abi1.0", "branding": "repodefault", "buildid": "20261022.48"}
   ]
 }
