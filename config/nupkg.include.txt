@@ -23,7 +23,8 @@
 # .NET 10 起，龙芯 feed 除了 RID 专有包，还要供下面这几个 OOB 库包：它们本身是
 # 纯 IL（nuget.org 也有），但离线 / 只配了龙芯 feed 的环境还原不到，所以从 PSA
 # 里一并推上去。
-# 不限定版本：PSA 里有哪个版本就推哪个，以后的主版本也照此匹配（不写 10.*）。
+# 版本限定 10.*：只推 .NET 10 的这两包；以后的主版本需要时照抄一行，把 10 换成
+# 对应主版本（还原成 System.IO.Hashing.*.nupkg 就是所有主版本都推）。
 # 要再加别的包，比照这里的写法加一行即可。
 System.IO.Hashing.10.*.nupkg
 System.Numerics.Tensors.10.*.nupkg
@@ -52,4 +53,5 @@ System.Numerics.Tensors.10.*.nupkg
 #   runtime.linux-loongarch64.runtime.native.System.IO.Ports.*.nupkg
 #
 # 单个包排除示例（注意 ! 优先，写在包含规则之后也能生效）：
-#   !Microsoft.NETCore.App.Crossgen2.linux-loongarch64.*.nupkg
+!Microsoft.NETCore.App.Crossgen2.linux-loongarch64.9.*.nupkg
+!Microsoft.NETCore.App.Crossgen2.linux-musl-loongarch64.9.*.nupkg

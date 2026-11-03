@@ -45,7 +45,9 @@
     "test_invariant）不在这份配置里 —— test.yml 尚未合并，等它搬过来时再加进对应的表。",
     "",
     "net12 三行是占位：ref 用的是还不存在的 v12.0.100-preview.1-abiX.0（误开 enabled 会在",
-    "克隆那一步就失败，不会白跑构建），buildid 留空；v12 分支/tag 就绪后换成真实值再开。"
+    "克隆那一步就失败，不会白跑构建），buildid 留空；v12 分支/tag 就绪后换成真实值再开。",
+    "runtime_tarballs 已打开，等 v12 首次构建验证产物布局 —— 布局不符会在 Resolve 那步",
+    "当场失败，不会发出缺压缩包的 Release。"
   ],
 
   "abis": {
@@ -98,8 +100,8 @@
     {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-rc.3.26522.148-abi2.0", "branding": "repodefault", "buildid": "20261022.48"},
     {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": true, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.3.26522.148-abi1.0", "branding": "repodefault", "buildid": "20261022.48"},
 
-    {"target": "net12-abi2.0-lns23", "group": "net12", "enabled": false, "nupkg": false, "major": 12, "abi": "abi2.0", "variant": "lns23", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
-    {"target": "net12-abi2.0-alpine", "group": "net12", "enabled": false, "nupkg": false, "major": 12, "abi": "abi2.0", "variant": "alpine", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
-    {"target": "net12-abi1.0-lns8", "group": "net12", "enabled": false, "nupkg": false, "major": 12, "abi": "abi1.0", "variant": "lns8", "ref": "v12.0.100-preview.1-abi1.0", "branding": "repodefault", "buildid": ""}
+    {"target": "net12-abi2.0-lns23", "group": "net12", "enabled": false, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi2.0", "variant": "lns23", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
+    {"target": "net12-abi2.0-alpine", "group": "net12", "enabled": false, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi2.0", "variant": "alpine", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
+    {"target": "net12-abi1.0-lns8", "group": "net12", "enabled": false, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi1.0", "variant": "lns8", "ref": "v12.0.100-preview.1-abi1.0", "branding": "repodefault", "buildid": ""}
   ]
 }
