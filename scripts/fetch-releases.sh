@@ -14,8 +14,9 @@
 #   fetch-releases.sh [--out <dir>] [--repo owner/repo] [--config <path>]
 #                     [--group net9|net10|net11|net12] [--tag <tag>]... [--all]
 #                     [--jobs N] [--progress|--no-progress] [--dry-run] [--force]
-#                     [--no-verify]
+#                     [--no-verify] [--help]
 #
+#   -h, --help 打印这段帮助（直接从文件头的注释里取，不另存一份）
 #   --out      下载根目录（默认 ./dl）；每个 Release 一个子目录 <out>/<tag>/
 #   --repo     目标仓库，默认让 gh 自己从 git remote 认（在仓库里跑就是 origin）
 #   --config   配置表路径（默认 config/targets.json，相对 cwd）；给了 --tag 就不读它
@@ -35,6 +36,9 @@
 #
 # 进度块：一个每秒刷新的渲染子进程，读父进程原子重写的 $WORK/pool.state，自己 stat
 # 目标文件算百分比 / 速度 / ETA —— 不解析 curl 的输出，看到的就是真实落盘字节。
+# 每个在下的文件占两行：名字一行（整行宽度都给名字，超长才中间截断，保留头尾），
+# 进度一行（条 / 百分比 / 已下 / 总大小 / 速度 / ETA）。速度只算**本次运行**新下的
+# 字节（扣掉启动时文件已有的部分），断点续传不会一上来就“飙车”、ETA 也不会变成 0。
 # 非终端（CI、重定向）不画块，只留每个文件一行 ✅ / ❌。
 #
 # 每个 Release 一个子目录是必须的：abi1.0 与 abi2.0 的资产**同名**（两个 Release 里
@@ -68,12 +72,18 @@ if [ "${BASH_VERSINFO[0]}" -lt 5 ] ||
   exit 2
 fi
 
+usage() {   # 帮助正文就是文件头那段注释，直接从脚本里取，省得两处内容漂移
+  sed -n '/^# fetch-releases\.sh ——/,/^# ====/p' "${BASH_SOURCE[0]}" \
+    | sed '$d; s/^# \{0,1\}//'
+}
+
 OUT=./dl REPO="" CONFIG=config/targets.json GROUP="" ALL=false JOBS=3
 DRY_RUN=false FORCE=false VERIFY=true PROGRESS=auto
 TAGS_OPT=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help)     usage; exit 0 ;;
     --out)         OUT=${2:-};           shift 2 ;;
     --repo)        REPO=${2:-};          shift 2 ;;
     --config)      CONFIG=${2:-};        shift 2 ;;
@@ -249,19 +259,29 @@ p_erase() {   # 擦掉上一帧，光标回到帧顶
   return 0
 }
 
+p_trunc() {   # $1 = 文本  $2 = 最大宽度：超宽时保留头尾、中间用一个 … 顶掉
+  local s=$1 w=$2 head tail
+  [ "${#s}" -le "$w" ] && { printf '%s' "$s"; return 0; }
+  [ "$w" -ge 5 ] || { printf '%s' "${s:0:w}"; return 0; }
+  head=$(( w / 2 ))
+  tail=$(( w - 1 - head ))
+  printf '%s…%s' "${s:0:head}" "${s: -tail}"
+}
+
 p_frame() {   # $1 = 终端宽度
   [ -f "$WORK/pool.state" ] || return 0
-  local cols=$1 now b pct filled elapsed eta speed k short
+  local cols=$1 now b pct filled elapsed eta speed k progress remaining
   local total_files total_bytes done_files done_bytes
-  local name path size start
-  local lines=()
+  local name path size start base
+  local lines=() nfiles=0
 
   IFS=$'\t' read -r total_files total_bytes done_files done_bytes < "$WORK/pool.state" || return 0
-  local w=$(( cols - 66 )); [ "$w" -lt 16 ] && w=16
+  local namew=$(( cols - 2 )); [ "$namew" -lt 20 ] && namew=20
   now=$(date +%s)
 
-  while IFS=$'\t' read -r name path size start; do
+  while IFS=$'\t' read -r name path size start base; do
     [ -n "$name" ] || continue
+    nfiles=$((nfiles+1))
     b=$(stat -c%s "$path" 2>/dev/null || echo 0)
     if [ "${size:-0}" -gt 0 ]; then pct=$(( b * 100 / size )); else pct=100; fi
 
@@ -271,19 +291,25 @@ p_frame() {   # $1 = 终端宽度
     done
 
     elapsed=$(( now - ${start:-$now} )); [ "$elapsed" -le 0 ] && elapsed=1
-    speed=$(( b / elapsed ))
-    if [ "$speed" -gt 0 ]; then eta=$(fmt_dur $(( (size - b) / speed ))); else eta="--"; fi
+    # 只把本次运行新下的字节算进速度：base 是任务启动时文件已有的字节数。
+    # 不扣掉它，续传第一帧就会把本地早已下好的几百 MB 当成 1 秒内的流量（速度飙升），
+    # 剩余量除以这个假速度，ETA 也跟着失真。
+    progress=$(( b - ${base:-0} )); [ "$progress" -lt 0 ] && progress=0
+    speed=$(( progress / elapsed ))
+    remaining=$(( size - b )); [ "$remaining" -lt 0 ] && remaining=0
+    if [ "$speed" -gt 0 ]; then eta=$(fmt_dur $(( remaining / speed ))); else eta="--"; fi
 
-    # 名字取尾部：变体 / RID 在末尾，截尾会认不出是哪一份
-    if [ "${#name}" -gt "$w" ]; then short="…${name: -$((w-1))}"; else short=$name; fi
-    lines+=( "$(printf '  %-*s [%s] %3d%% %s/%s %s 剩 %s' \
-                "$w" "$short" "$bar" "$pct" "$(human "$b")" "$(human "$size")" \
+    # 名字单独占一行：宽度几乎全给名字；超宽时中间截断 —— 头（包名/版本）和尾
+    # （RID.tar.gz）都留着，一眼能认出是哪一份
+    lines+=( "  $(p_trunc "$name" "$namew")" )
+    lines+=( "$(printf '    [%s] %3d%% %s/%s  %s  剩 %s' \
+                "$bar" "$pct" "$(human "$b")" "$(human "$size")" \
                 "$(rate "$speed")" "$eta")" )
   done < <(tail -n +2 "$WORK/pool.state" 2>/dev/null)
 
   p_erase
   printf '下载中 %d 个 · 已完成 %d/%d 个 · 合计 %s / %s\n' \
-    "${#lines[@]}" "${done_files:-0}" "${total_files:-0}" \
+    "$nfiles" "${done_files:-0}" "${total_files:-0}" \
     "$(human "${done_bytes:-0}")" "$(human "${total_bytes:-0}")" >&2
   [ "${#lines[@]}" -gt 0 ] && printf '%s\n' "${lines[@]}" >&2
   R_DRAWN=$(( ${#lines[@]} + 1 ))
@@ -334,18 +360,20 @@ download_one() {   # $1 tag  $2 name  $3 size  $4 url  $5 dir
 }
 
 POOL_TOTAL=0 POOL_TOTAL_BYTES=0 POOL_OK=0 POOL_DONE_BYTES=0
-declare -A ST=() J_T0=()
+declare -A ST=() J_T0=() J_BASE=()
 
 write_state() {   # 原子重写 pool.state，渲染进程永远读到完整的一份
   local tmp="$WORK/pool.state.tmp" k
   {
     printf '%s\t%s\t%s\t%s\n' "$POOL_TOTAL" "$POOL_TOTAL_BYTES" "$POOL_OK" "$POOL_DONE_BYTES"
-    for k in ${ST[@]+"${!ST[@]}"}; do printf '%s\t%s\n' "${ST[$k]}" "${J_T0[$k]}"; done
+    for k in ${ST[@]+"${!ST[@]}"}; do
+      printf '%s\t%s\t%s\n' "${ST[$k]}" "${J_T0[$k]}" "${J_BASE[$k]:-0}"
+    done
   } > "$tmp" && mv -f "$tmp" "$WORK/pool.state"
 }
 
 run_pool() {
-  local next=0 done=0 row jtag jname jsize jurl jdir pid fin rc dur jn jp js info
+  local next=0 done=0 row jtag jname jsize jurl jdir pid fin rc dur jn jp js info jbase
   POOL_TOTAL=${#QUEUE[@]}
   [ "$POOL_TOTAL" -gt 0 ] || return 0
 
@@ -361,10 +389,19 @@ run_pool() {
     while [ "${#ST[@]}" -lt "$JOBS" ] && [ "$next" -lt "$POOL_TOTAL" ]; do
       row="${QUEUE[$next]}"; next=$((next+1))
       IFS=$'\t' read -r jtag jname jsize jurl jdir <<< "$row"
+      # 续传起点：任务启动前文件已有的字节数。渲染进程用它把这一截从速度里扣掉，
+      # 否则一续传就把本地早就下好的几百 MB 当成这一秒的流量。与 download_one
+      # 保持一致：文件已经 >= 登记大小（坏包 / --force）会被先删掉，起点算 0。
+      jbase=0
+      if [ -f "$jdir/$jname" ]; then
+        jbase=$(stat -c%s "$jdir/$jname" 2>/dev/null || echo 0)
+      fi
+      [ "${jbase:-0}" -ge "${jsize:-0}" ] && jbase=0
       download_one "$jtag" "$jname" "$jsize" "$jurl" "$jdir" &
       pid=$!
       ST[$pid]="$jname"$'\t'"$jdir/$jname"$'\t'"$jsize"
       J_T0[$pid]=$(date +%s)
+      J_BASE[$pid]=$jbase
       write_state
     done
 
@@ -373,7 +410,8 @@ run_pool() {
     wait -n -p fin "${!ST[@]}" || rc=$?
 
     info="${ST[$fin]:-}"; unset 'ST[$fin]'
-    dur=$(( $(date +%s) - ${J_T0[$fin]:-$(date +%s)} )); unset 'J_T0[$fin]'
+    dur=$(( $(date +%s) - ${J_T0[$fin]:-$(date +%s)} ))
+    unset 'J_T0[$fin]' 'J_BASE[$fin]'
     IFS=$'\t' read -r jn jp js <<< "$info"
     done=$((done+1))
 
