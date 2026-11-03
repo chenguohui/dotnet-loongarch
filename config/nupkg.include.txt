@@ -26,7 +26,7 @@
 # 版本限定 10.*：只推 .NET 10 的这两包；以后的主版本需要时照抄一行，把 10 换成
 # 对应主版本（还原成 System.IO.Hashing.*.nupkg 就是所有主版本都推）。
 # 要再加别的包，比照这里的写法加一行即可。
-System.IO.Hashing.10.*.nupkg
+# System.IO.Hashing.10.*.nupkg
 System.Numerics.Tensors.10.*.nupkg
 
 # ---- 排除 ------------------------------------------------------------------
