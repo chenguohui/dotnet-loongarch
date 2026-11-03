@@ -100,8 +100,8 @@
     {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-rc.3.26522.148-abi2.0", "branding": "repodefault", "buildid": "20261022.48"},
     {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": true, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.3.26522.148-abi1.0", "branding": "repodefault", "buildid": "20261022.48"},
 
-    {"target": "net12-abi2.0-lns23", "group": "net12", "enabled": false, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi2.0", "variant": "lns23", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
-    {"target": "net12-abi2.0-alpine", "group": "net12", "enabled": false, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi2.0", "variant": "alpine", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
-    {"target": "net12-abi1.0-lns8", "group": "net12", "enabled": false, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi1.0", "variant": "lns8", "ref": "v12.0.100-preview.1-abi1.0", "branding": "repodefault", "buildid": ""}
+    {"target": "net12-abi2.0-lns23", "group": "net12", "enabled": true, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi2.0", "variant": "lns23", "ref": "v12.0.100-alpha.1.26530.104-abi2.0", "branding": "repodefault", "buildid": "20261030.4"},
+    {"target": "net12-abi2.0-alpine", "group": "net12", "enabled": true, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi2.0", "variant": "alpine", "ref": "v12.0.100-alpha.1.26530.104-abi2.0", "branding": "repodefault", "buildid": "20261030.4"},
+    {"target": "net12-abi1.0-lns8", "group": "net12", "enabled": true, "nupkg": false, "runtime_tarballs": true, "major": 12, "abi": "abi1.0", "variant": "lns8", "ref": "v12.0.100-alpha.1.26530.104-abi1.0", "branding": "repodefault", "buildid": "20261030.4"}
   ]
 }
