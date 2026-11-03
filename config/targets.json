@@ -5,13 +5,17 @@
     "targets[]  每条 = 一个 (ref × 构建变体)。同一个 release_tag 的多个变体（如 lns23 + alpine）",
     "           合并发布到同一个 GitHub Release。",
     "  target    构建 job 标识，同时用于 artifact 名",
-    "  group     net9 / net10 / net11 —— workflow_dispatch 的 target 输入按此过滤",
+    "  group     net9 / net10 / net11 / net12 —— workflow_dispatch 的 target 输入按此过滤",
     "  enabled   false = 预留不触发（例如分支尚未就绪）",
-    "  major     .NET 主版本，决定构建命令（9 用 prep-source-build.sh，10/11 用 --prep）",
+    "  nupkg     false = 不参与 nupkg.yml「留空输入」时的自动上传（手动指定 release_tags",
+    "            仍可推）；缺省 true。.NET 12 默认关闭",
+    "  runtime_tarballs  true = 发布时连同 dotnet-runtime / aspnetcore-runtime 压缩包一起",
+    "            上传（给用户装运行时用）；缺省 false。.NET 10 起需要",
+    "  major     .NET 主版本，决定构建命令（9 用 prep-source-build.sh，10/11/12 用 --prep）",
     "  abi       指向下面 abis 表的键",
     "  variant   指向下面 variants 表的键",
     "  ref       chenguohui/dotnet 里的分支或 tag（CI 不打补丁，分支即事实来源）",
-    "  branding  v10: release / v11: repodefault（v9 不使用）",
+    "  branding  v10: release / v11、v12: repodefault（v9 不使用）",
     "  buildid   dotnet OfficialBuildId（v9 不使用）",
     "",
     "以下字段由 ref + abi 推导，条目不写即用推导值；需要覆盖时显式写上即可：",
@@ -38,7 +42,10 @@
     "                               都没有（实测 11.0.100-rc.1），所以留空；glibc 变体取实测上限",
     "",
     "只在 test.yml 里用到的键（binfmt_image、binfmt_arch、runtime_test、test_image、test_deps、",
-    "test_invariant）不在这份配置里 —— test.yml 尚未合并，等它搬过来时再加进对应的表。"
+    "test_invariant）不在这份配置里 —— test.yml 尚未合并，等它搬过来时再加进对应的表。",
+    "",
+    "net12 三行是占位：ref 用的是还不存在的 v12.0.100-preview.1-abiX.0（误开 enabled 会在",
+    "克隆那一步就失败，不会白跑构建），buildid 留空；v12 分支/tag 就绪后换成真实值再开。"
   ],
 
   "abis": {
@@ -83,12 +90,16 @@
     {"target": "net9-abi2.0-alpine", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "alpine", "ref": "v9.0.123-abi2.0", "branding": "", "buildid": ""},
     {"target": "net9-abi1.0-lns8", "group": "net9", "enabled": true, "major": 9, "abi": "abi1.0", "variant": "lns8", "ref": "v9.0.123-abi1.0", "branding": "", "buildid": ""},
 
-    {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
-    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
-    {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.114-abi1.0", "branding": "release", "buildid": "20261022.26"},
+    {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
+    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
+    {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.114-abi1.0", "branding": "release", "buildid": "20261022.26"},
 
     {"target": "net11-abi2.0-lns23", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "lns23", "ref": "v11.0.100-rc.3.26522.148-abi2.0", "branding": "repodefault", "buildid": "20261022.48"},
     {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-rc.3.26522.148-abi2.0", "branding": "repodefault", "buildid": "20261022.48"},
-    {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": true, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.3.26522.148-abi1.0", "branding": "repodefault", "buildid": "20261022.48"}
+    {"target": "net11-abi1.0-lns8", "group": "net11", "enabled": true, "major": 11, "abi": "abi1.0", "variant": "lns8", "ref": "v11.0.100-rc.3.26522.148-abi1.0", "branding": "repodefault", "buildid": "20261022.48"},
+
+    {"target": "net12-abi2.0-lns23", "group": "net12", "enabled": false, "nupkg": false, "major": 12, "abi": "abi2.0", "variant": "lns23", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
+    {"target": "net12-abi2.0-alpine", "group": "net12", "enabled": false, "nupkg": false, "major": 12, "abi": "abi2.0", "variant": "alpine", "ref": "v12.0.100-preview.1-abi2.0", "branding": "repodefault", "buildid": ""},
+    {"target": "net12-abi1.0-lns8", "group": "net12", "enabled": false, "nupkg": false, "major": 12, "abi": "abi1.0", "variant": "lns8", "ref": "v12.0.100-preview.1-abi1.0", "branding": "repodefault", "buildid": ""}
   ]
 }

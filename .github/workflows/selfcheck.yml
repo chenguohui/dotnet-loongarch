@@ -17,7 +17,8 @@ name: SDK self-check (published releases)
 #
 # 自动链：build.yml →（本工作流）→ nupkg.yml。自检**全绿**（配置表期望的每个变体都有
 # 结果、且没有 ❌；⚠️ 不拦）的 Release 会自动交给 nupkg.yml 去推 nupkg；手动的体检
-# 不触发上传（那是来看现状的，要补传直接手动跑 nupkg.yml）。
+# 不触发上传（那是来看现状的，要补传直接手动跑 nupkg.yml）。配置表里 nupkg: false 的
+# tag 不参与自动上传（.NET 12 默认关闭）—— 要推就手动跑 nupkg.yml 并显式给 tag。
 #
 # 注意：workflow_dispatch / workflow_run 都要求本文件已经在默认分支上才会被触发
 # （在 feature 分支上 `gh workflow run` 与 dispatch API 都是 404）—— 端到端验证必须
@@ -495,7 +496,7 @@ jobs:
           for u in ${unclean[@]+"${unclean[@]}"}; do echo "- ❌ $u"; done
           echo
           echo "> 全绿 = 配置表期望的每个变体都有结果且没有 ❌（⚠️ 不拦）。build.yml 触发的"
-          echo "> 那一轮里，全绿的 tag 会自动交给 nupkg.yml 上传 nupkg。"
+          echo "> 那一轮里，全绿的 tag 会自动交给 nupkg.yml 上传 nupkg（nupkg: false 的除外）。"
           echo
           echo "### 各资产报告"
           echo
@@ -528,7 +529,7 @@ jobs:
           sdk-selfcheck-report.md
           clean-tags.txt
 
-    # 自检全绿的 Release → 触发 nupkg.yml（把 PSA 里的 RID 专有包推到龙芯 feed）。
+    # 自检全绿的 Release → 触发 nupkg.yml（按白名单把 PSA 里的包推到龙芯 feed）。
     # 只在「build.yml 跑完自动触发的这一轮」里做：手动跑 selfcheck 是来体检历史版本的，
     # 不该顺手把包推出去（要补传就直接手动触发 nupkg.yml）。
     - name: 触发 nupkg 上传
@@ -542,6 +543,31 @@ jobs:
         mapfile -t tags < <(grep . clean-tags.txt 2>/dev/null || true)
         if [ "${#tags[@]}" -eq 0 ]; then
           echo "没有全绿的 Release，不触发 nupkg.yml（原因见上面的结论）"
+          exit 0
+        fi
+
+        # 配置表里 nupkg: false 的 tag 不自动上传（.NET 12 默认关闭）。判据与 nupkg.yml
+        # 的自动选择一致：该 tag 的所有行都 nupkg: false 才跳过。显式触发 nupkg.yml
+        # 并给 release_tags 时不受此限 —— 要补传仍有办法。
+        nupkg_on=$(jq -r '
+          .targets
+          | map(. + { sdk_version: (.sdk_version // (.ref | sub("^v"; "") | sub("-abi[12]\\.0$"; ""))) })
+          | map(. + { release_tag: (.release_tag // ("v" + .sdk_version + "-" + .abi)) })
+          | group_by(.release_tag)
+          | map(select(map(.nupkg != false) | any) | .[0].release_tag)
+          | .[]
+        ' config/targets.json)
+        kept=()
+        for t in "${tags[@]}"; do
+          if printf '%s\n' "$nupkg_on" | grep -qxF "$t"; then
+            kept+=("$t")
+          else
+            echo "$t 在 config/targets.json 里 nupkg: false，跳过自动上传（要传请手动跑 nupkg.yml）"
+          fi
+        done
+        mapfile -t tags < <(printf '%s\n' "${kept[@]:-}" | grep . || true)
+        if [ "${#tags[@]}" -eq 0 ]; then
+          echo "全绿的 tag 都被 nupkg 开关挡掉了，不触发 nupkg.yml"
           exit 0
         fi
         echo "全绿：${tags[*]} → 触发 nupkg.yml"

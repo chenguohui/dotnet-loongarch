@@ -1,8 +1,8 @@
 name: Upload LoongArch nupkgs
 
 # 把 Release 里 Private.SourceBuilt.Artifacts.*.tar.gz（PSA；作为**永久资产**随 Release
-# 保存，所以历史版本可以随时回填）解出来的 RID 专有 nupkg（含 ELF、社区不生成的那批，
-# 白名单 config/nupkg.include.txt）推到龙芯 NuGet：
+# 保存，所以历史版本可以随时回填）解出来的 nupkg 按白名单推到龙芯 NuGet
+# （config/nupkg.include.txt：默认是 RID 专有包，另加 .NET 10 起点名的几个 OOB 库包）：
 #   ABI1.0（lns8）        → https://nuget.loongnix.cn/v3/index.json
 #   ABI2.0（lns23/alpine）→ https://lnuget.loongnix.cn/v3/index.json
 # feed 与密钥的对应关系在 config/targets.json 的 abis 表（nuget_source /
@@ -12,9 +12,11 @@ name: Upload LoongArch nupkgs
 # 不进仓库、不进日志（脚本会把失败输出里的密钥抹掉再打）。
 #
 # 触发方式：
-#   - 手动 workflow_dispatch：补传/回填历史版本；留空 = config 里 enabled 的全部
+#   - 手动 workflow_dispatch：补传/回填历史版本；留空 = config 里 enabled 且没有关掉
+#     nupkg 的全部；显式给 release_tags 时不受这两个开关限制（nupkg: false 的也能推）
 #   - selfcheck.yml 自检全绿后自动触发（build.yml → selfcheck.yml → nupkg.yml），
-#     只传全绿的那些 tag；自检第一版只报告，所以「全绿」由那份报告算出来
+#     只传全绿的那些 tag；自检第一版只报告，所以「全绿」由那份报告算出来。
+#     自动链里配置表 nupkg: false 的 tag 会被 selfcheck.yml 挡掉（.NET 12 默认关闭）
 #
 # 覆盖：feed 上已有同 id+版本时**默认跳过**（自动触发那条链也走这个默认 —— 它只该
 # 补新版本，不该换掉 feed 上已有的东西）。手动触发时勾 overwrite=true 才覆盖：
@@ -36,7 +38,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tags:
-        description: '要上传的 Release tag（空格或逗号分隔）；留空 = config/targets.json 里 enabled 的全部'
+        description: '要上传的 Release tag（空格或逗号分隔）；留空 = config/targets.json 里 enabled 且 nupkg 未关的全部'
         required: false
         type: string
         default: ''
@@ -113,11 +115,12 @@ jobs:
 
         # ── 2. tag → abi + 该 tag 的变体(rid) ───────────────────────────────
         # 用**全部**条目（不限 enabled）：手动补传历史版本时 enabled=false 的占位行
-        # 也可能要推；enabled 只用来决定「留空输入」时处理哪些 tag
-        declare -A TAG_ABI=() TAG_VARS=() TAG_ON=()
-        while IFS=$'\t' read -r t a on vs; do
+        # 也可能要推；enabled / nupkg 只用来决定「留空输入」时处理哪些 tag
+        # （nupkg: false 的 tag 一次性全关 —— .NET 12 默认不上传，等要推时显式给 tag）
+        declare -A TAG_ABI=() TAG_VARS=() TAG_ON=() TAG_NUPKG=()
+        while IFS=$'\t' read -r t a on nk vs; do
           [ -n "$t" ] || continue
-          TAG_ABI[$t]=$a; TAG_VARS[$t]=$vs; TAG_ON[$t]=$on
+          TAG_ABI[$t]=$a; TAG_VARS[$t]=$vs; TAG_ON[$t]=$on; TAG_NUPKG[$t]=$nk
         done < <(jq -r '
           .variants as $V
           | .targets
@@ -128,6 +131,7 @@ jobs:
           | [ .[0].release_tag,
               .[0].abi,
               (if (map(.enabled) | any) then "true" else "false" end),
+              (if (map(.nupkg != false) | any) then "true" else "false" end),
               (map({ v: .variant, r: $V[.variant].rid }) | unique_by(.v) | sort_by(.v)
                | map("\(.v):\(.r)") | join(",")) ]
           | @tsv
@@ -137,14 +141,20 @@ jobs:
         tags=()
         if [ -n "${TAGS_INPUT//[[:space:],]/}" ]; then
           read -r -a tags <<< "${TAGS_INPUT//,/ }"
+          # 显式指定就不受开关限制，但把「这条默认是不推的」说出来，免得以为是自动链
+          for t in "${tags[@]}"; do
+            [ "${TAG_NUPKG[$t]:-true}" = true ] \
+              || echo "::warning::$t 在配置表里 nupkg: false（默认不上传）—— 本次是显式指定，仍按输入处理"
+          done
         else
           mapfile -t tags < <(for t in "${!TAG_ON[@]}"; do
-                                [ "${TAG_ON[$t]}" = true ] && printf '%s\n' "$t"
+                                [ "${TAG_ON[$t]}" = true ] && [ "${TAG_NUPKG[$t]}" = true ] \
+                                  && printf '%s\n' "$t"
                               done | LC_ALL=C sort)
         fi
         mapfile -t tags < <(printf '%s\n' "${tags[@]:-}" | grep . | LC_ALL=C sort -u)
         if [ "${#tags[@]}" -eq 0 ]; then
-          echo "::error::没有要处理的 tag（输入为空，且配置表里没有 enabled 的条目？）"
+          echo "::error::没有要处理的 tag（输入为空，且配置表里没有 enabled 且 nupkg 未关的条目？）"
           exit 1
         fi
         echo "待处理 tag：${tags[*]}"

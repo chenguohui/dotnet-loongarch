@@ -12,14 +12,14 @@
 #
 # 用法：
 #   fetch-releases.sh [--out <dir>] [--repo owner/repo] [--config <path>]
-#                     [--group net9|net10|net11] [--tag <tag>]... [--all]
+#                     [--group net9|net10|net11|net12] [--tag <tag>]... [--all]
 #                     [--jobs N] [--progress|--no-progress] [--dry-run] [--force]
 #                     [--no-verify]
 #
 #   --out      下载根目录（默认 ./dl）；每个 Release 一个子目录 <out>/<tag>/
 #   --repo     目标仓库，默认让 gh 自己从 git remote 认（在仓库里跑就是 origin）
 #   --config   配置表路径（默认 config/targets.json，相对 cwd）；给了 --tag 就不读它
-#   --group    只下该组（net9 / net10 / net11，同 workflow_dispatch 的 target 输入）
+#   --group    只下该组（net9 / net10 / net11 / net12，同 workflow_dispatch 的 target 输入）
 #   --tag      只下这些 tag（可重复）。给的是任意 tag，不查配置表 —— 补历史版本用
 #   --all      连 Private.SourceBuilt.Artifacts.* 一起下（默认只下 dotnet-sdk-*.tar.gz）
 #   --jobs     同时下几个文件（默认 3）—— 同一个 Release 里的多个文件因此能并行

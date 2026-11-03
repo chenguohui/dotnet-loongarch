@@ -9,7 +9,7 @@ on:
         type: string
         default: chenguohui
       target:
-        description: '构建哪一组；net9/net10/net11 只跑对应版本，all 跑全部'
+        description: '构建哪一组；net9/net10/net11/net12 只跑对应版本，all 跑全部'
         required: true
         type: choice
         options:
@@ -17,6 +17,7 @@ on:
           - net9
           - net10
           - net11
+          - net12
         default: all
       release:
         description: '创建 GitHub Release'
@@ -236,7 +237,7 @@ jobs:
             fi
             CMD="./prep-source-build.sh && ./build.sh -c Release -sb --os ${{ matrix.os }} --arch loongarch64 --clean-while-building -- $props"
             ;;
-          10|11)
+          10|11|12)
             CMD="./build.sh --clean-while-building --prep -sb --os ${{ matrix.os }} --rid ${{ matrix.rid }} --arch loongarch64 --branding ${{ matrix.branding }} -p:OfficialBuildId=${{ matrix.buildid }}"
             ;;
           *)
@@ -291,6 +292,34 @@ jobs:
         echo "psa_glob=$psa" >> "$GITHUB_OUTPUT"
         echo "SDK 产物:        $(compgen -G "$sdk" | tr '\n' ' ')"
         echo "SourceBuilt 产物: $(compgen -G "$psa" | tr '\n' ' ')"
+
+        # .NET 10 起，发布资产里还要带运行时压缩包（dotnet-runtime / aspnetcore-runtime，
+        # 给用户装运行时用），只在配置表 runtime_tarballs: true 的条目上收。
+        # 它们不在 Release/Sdk/ 下，固定是 Release/Runtime/<ver>/ 与
+        # Release/aspnetcore/Runtime/<ver>/；文件名以本变体的 RID 结尾。
+        # 找不到 / 有多份 / RID 不符都直接失败 —— 否则 Release 会悄悄少两包压缩包。
+        runtime_asset() {   # $1=目录前缀 $2=文件名前缀 $3=输出名
+          local found glob
+          # 前缀后面必须直接是版本号（[0-9]*）：同一目录里还有
+          # aspnetcore-runtime-composite-*、dotnet-nethost-symbols-* 这类文件名，
+          # 用 $2-*.tar.gz 会把它们一起匹配进来
+          glob="$root/Release/$1/*/$2-[0-9]*.tar.gz"
+          mapfile -t found < <(compgen -G "$glob" || true)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::$glob 应匹配到唯一一份，实际 ${#found[@]} 份 —— 上游产物布局变了？"
+            return 1
+          fi
+          case "${found[0]}" in
+            *-"${{ matrix.rid }}".tar.gz) ;;
+            *) echo "::error::$2 产物的 RID 与 ${{ matrix.rid }} 不符：$(basename "${found[0]}")"; return 1 ;;
+          esac
+          echo "运行时产物: ${found[0]}"
+          echo "$3=${found[0]}" >> "$GITHUB_OUTPUT"
+        }
+        if [ '${{ matrix.runtime_tarballs }}' = 'true' ]; then
+          runtime_asset Runtime dotnet-runtime runtime_path
+          runtime_asset aspnetcore/Runtime aspnetcore-runtime aspnetcore_path
+        fi
 
         # 产物名必须与本变体的 RID 相符。构建命令少给 RID 属性时（例如 .NET 9 的 alpine
         # 变体少了 HostRid/PortableRid），产出的是另一个 RID 的包、名字也跟着错，
@@ -349,6 +378,22 @@ jobs:
         name: selfcheck--${{ matrix.release_tag }}--${{ matrix.variant }}
         retention-days: 30
         path: ${{ github.workspace }}/build-info/selfcheck-${{ matrix.variant }}.md
+
+    # 运行时压缩包单独一个 artifact（upload-artifact v4 不允许往同名 artifact 追加）。
+    # 名字仍以 assets-- 开头，release job 的 assets--<tag>--* 会把它一并下载合并。
+    # 顺序放在 Upload .NET 之前：这一步失败时 build-info 还没上传，release job 会因为
+    # 缺变体跳过整个 Release，而不是发出一个少了两包压缩包的版本。
+    - name: Upload runtimes
+      if: ${{ matrix.runtime_tarballs }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: assets--${{ matrix.release_tag }}--${{ matrix.variant }}-runtime
+        retention-days: 7
+        compression-level: 0  # 产物本身已压缩
+        if-no-files-found: error
+        path: |
+          ${{ steps.assets.outputs.runtime_path }}
+          ${{ steps.assets.outputs.aspnetcore_path }}
 
     - name: Upload .NET
       uses: actions/upload-artifact@v4
