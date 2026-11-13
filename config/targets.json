@@ -92,9 +92,9 @@
     {"target": "net9-abi2.0-alpine", "group": "net9", "enabled": true, "major": 9, "abi": "abi2.0", "variant": "alpine", "ref": "v9.0.124-abi2.0", "branding": "", "buildid": ""},
     {"target": "net9-abi1.0-lns8", "group": "net9", "enabled": true, "major": 9, "abi": "abi1.0", "variant": "lns8", "ref": "v9.0.124-abi1.0", "branding": "", "buildid": ""},
 
-    {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
-    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.114-abi2.0", "branding": "release", "buildid": "20261022.26"},
-    {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.114-abi1.0", "branding": "release", "buildid": "20261022.26"},
+    {"target": "net10-abi2.0-lns23", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi2.0", "variant": "lns23", "ref": "v10.0.115-abi2.0", "branding": "release", "buildid": "20261029.8"},
+    {"target": "net10-abi2.0-alpine", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi2.0", "variant": "alpine", "ref": "v10.0.115-abi2.0", "branding": "release", "buildid": "20261029.8"},
+    {"target": "net10-abi1.0-lns8", "group": "net10", "enabled": true, "runtime_tarballs": true, "major": 10, "abi": "abi1.0", "variant": "lns8", "ref": "v10.0.115-abi1.0", "branding": "release", "buildid": "20261029.8"},
 
     {"target": "net11-abi2.0-lns23", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "lns23", "ref": "v11.0.100-abi2.0", "branding": "release", "buildid": "20261029.18"},
     {"target": "net11-abi2.0-alpine", "group": "net11", "enabled": true, "major": 11, "abi": "abi2.0", "variant": "alpine", "ref": "v11.0.100-abi2.0", "branding": "release", "buildid": "20261029.18"},
